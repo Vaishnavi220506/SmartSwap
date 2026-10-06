@@ -1,0 +1,13 @@
+\section{Lessons from a Flawed First Evaluation}
+\label{sec:lessons}
+
+SmartSwap~v1 reported statistically reliable reductions of foreground p95 latency (e.g., 9.5\,\% under ``CPU contention'' and 16.2\,\% under ``I/O contention''). An audit before this study found those results invalid, for reasons that apply well beyond this project:
+\begin{enumerate}
+\item \emph{The load never ran.} CPU workers were started with Python \texttt{multiprocessing} from a \texttt{python -c} script. On Windows the \emph{spawn} start method re-imports the target from \texttt{\_\_main\_\_}, which does not exist for \texttt{-c}, so every worker died at once. The background process exited after about 0.12\,s, long before measurement began.
+\item \emph{The control was not a control.} The ``no-pressure'' preset used the same workload as ``CPU contention'', so their indistinguishable p95 (7.2 vs.\ 8.3\,ms) looked like a calm baseline.
+\item \emph{The validity gate measured the wrong thing.} Runs were labelled valid when probe p95 exceeded 5\,ms. The probe's own compute step took 4--5\,ms, while scheduling delay stayed near 0.5\,ms in every preset.
+\item \emph{Absence of action was hard-coded.} Zero actions in the control came from a preset-name check, not from detection.
+\item \emph{Reverts were asserted, not observed.} Closing a Job Object handle does not lift a CPU-rate cap from live members, yet the cap was logged as reverted.
+\item \emph{Statistics.} A fixed $z=1.96$ was used for paired intervals at every $n>5$, the baseline always ran before the treatment, and the cost to background work was never measured.
+\end{enumerate}
+Each defect produced plausible-looking numbers; none raised an error. The v2 harness guards against all of them by construction. Workers handshake \texttt{READY} and report work done. The control has no workers. Interference is tested against that control. Actions are decided only by the canary. Every action and revert is read back from the kernel. Order is randomised per block. Background throughput is measured in the same window as foreground latency.

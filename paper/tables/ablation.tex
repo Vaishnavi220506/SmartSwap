@@ -1,0 +1,15 @@
+\begin{tabular}{llrrr}
+\toprule
+Workload & Variant & p95 ratio vs.\ full v2 [95\% CI] & $p_{\mathrm{Holm}}$ & BG work kept \\
+\midrule
+CPU & v2 w/o ladder & 4.82 [3.38, 7.01] & 0.072 & 30\% \\
+ & v2 w/o AIMD & 1.03 [0.95, 1.20] & 1.000 & 67\% \\
+ & v2 w/o benefit check & 0.92 [0.83, 1.32] & 1.000 & 67\% \\
+Memory bandwidth & v2 w/o ladder & 1.07 [1.00, 1.37] & 0.469 & 53\% \\
+ & v2 w/o AIMD & 1.11 [1.00, 1.18] & 0.742 & 97\% \\
+ & v2 w/o benefit check & 0.98 [0.89, 1.02] & 1.000 & 61\% \\
+Mixed & v2 w/o ladder & 3.84 [2.94, 7.87] & 0.072 & 40\% \\
+ & v2 w/o AIMD & 0.97 [0.86, 1.32] & 1.000 & 69\% \\
+ & v2 w/o benefit check & 0.97 [0.90, 1.13] & 1.000 & 66\% \\
+\bottomrule
+\end{tabular}

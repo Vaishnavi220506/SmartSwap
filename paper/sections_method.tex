@@ -1,0 +1,27 @@
+\section{Evaluation Methodology}
+\label{sec:method}
+
+\textbf{Foreground.} A probe process emulates an interactive loop. Every 50\,ms it wakes and performs a compute step (12\,000 interpreter iterations), an 8\,MiB memory stream, and a 4\,KiB unbuffered random read from its own 64\,MiB file. A beat's \emph{response latency} is the sum of its scheduling delay and the three timed steps. A beat is a deadline miss above 25\,ms. Each trial warms up for 1\,s and then measures 6\,s (120 beats). The primary metric is the trial's p95 response latency. The controller never sees this probe: its canary is a different process with a different period and work size.
+
+\textbf{Interference workloads.} All workloads are bounded processes owned by SmartSwap:
+\emph{CPU}: $2\times$ the logical CPU count of spinning workers;
+\emph{memory bandwidth}: one worker per two logical CPUs, each copying a 64\,MiB buffer;
+\emph{storage reads}: 16 workers issuing 1\,MiB unbuffered random reads over a 1\,GiB file (read-only, so no SSD wear);
+\emph{mixed}: CPU, bandwidth, and storage workers together;
+\emph{no interference}: a control with no background workers.
+
+\textbf{Policies.}
+\emph{None}: no mitigation.
+\emph{Static priority}: every background worker is unconditionally set to \texttt{IDLE} priority class and very-low I/O priority. This is the strongest simple baseline, the Windows analogue of \texttt{nice 19} with \texttt{ionice -c3}.
+\emph{SmartSwap~v1}: our earlier design, an unconditional 35\,\% Job CPU-rate cap plus \texttt{ABOVE\_NORMAL} priority for the foreground.
+\emph{SmartSwap~v2}: the adaptive controller of \S\ref{sec:design}.
+\emph{Observe-only}: v2's canary and controller run, but actions are suppressed. This measures monitoring overhead and gives attribution labels unconfounded by mitigation.
+\emph{Ablations} (CPU, bandwidth, mixed): v2 without the ladder (straight to the AIMD cap), without AIMD (fixed 50\,\% cap), and without benefit verification.
+
+\textbf{Cost.} Each background worker counts completed work units, bucketed by wall time. We report \emph{background work kept}: units completed inside the foreground's measurement window, relative to the no-mitigation trial of the same block. Each worker role is weighted equally in the mixed workload. A policy that protects the foreground by starving the background is visible as such.
+
+\textbf{Design and statistics.} We use a randomised complete block design. Each block runs every (workload, policy) cell once, in a fresh order drawn from a seeded RNG, after re-calibrating the canary on an idle host. Blocking and randomisation spread slow drift (thermal state, turbo budget, unrelated desktop activity) across policies instead of letting it bias one of them~\cite{georges2007rigorous,kalibera2013rigorous}. All comparisons are paired by block. For each we report the median of per-block p95 ratios with a 95\,\% percentile-bootstrap interval (10\,000 resamples over blocks)~\cite{efron1993bootstrap} and an exact two-sided Wilcoxon signed-rank test on paired differences~\cite{wilcoxon1945}. We apply Holm--Bonferroni adjustment~\cite{holm1979} across \emph{every} comparison reported in the paper as one family. Workloads are never pooled: each is its own experiment. Before each trial we sample non-study host CPU load for one second and keep it as a covariate.
+
+\textbf{Interference validity.} A workload only supports conclusions about mitigation if it measurably hurts the foreground. We therefore first test unmitigated p95 under each workload against the no-interference control of the same block.
+
+\textbf{Host.} One laptop: Intel Core Ultra~9 285H (hybrid, 16 cores and 16 threads, no SMT), 32\,GB RAM, NVMe SSD, Windows~11 build 26200, AC power, \emph{Balanced} power plan. We deliberately did \emph{not} quiesce the desktop. OneDrive, Google Drive, and Windows Search were active throughout, as on a real user's machine. Controller parameters were set during pilot runs on this host and then frozen before the study; none were tuned on study data.

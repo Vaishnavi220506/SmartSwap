@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SmartSwap - interference monitor</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="mark" aria-hidden="true"></span><div><b>SmartSwap</b><small>Interference-aware control for Windows</small></div></div>
+  <nav aria-label="Pages">
+    <a href="#monitor" data-page="monitor" class="active">Monitor</a>
+    <a href="#experiment" data-page="experiment">Experiment</a>
+    <a href="#evidence" data-page="evidence">Evidence</a>
+    <a href="#reports" data-page="reports">Reports</a>
+  </nav>
+  <div class="host" id="host-status"><i class="dot"></i><span>Connecting…</span></div>
+</header>
+
+<main>
+<!-- MONITOR -->
+<section id="page-monitor" class="page active" aria-labelledby="h-monitor">
+  <div class="hero">
+    <div class="hero-text">
+      <span class="eyebrow">Live on this PC</span>
+      <h1 id="h-monitor">How much time is this PC stealing from you?</h1>
+      <p class="lede">Background work (updates, sync, indexing, builds) quietly delays what you are doing. SmartSwap measures that delay directly, names the resource causing it, and applies the cheapest fix that works.</p>
+      <div class="hero-actions">
+        <button id="live-toggle" class="btn primary" type="button">Start stall monitoring</button>
+        <a class="btn" href="#experiment">Run an experiment</a>
+      </div>
+    </div>
+    <div class="hero-gauge" aria-live="polite">
+      <div class="gauge" id="gauge" style="--v:0"><div><b id="gauge-value">–</b><span id="gauge-label">CPU in use</span></div></div>
+      <p class="muted small" id="gauge-note">Start stall monitoring to switch this dial to the Windows Stall Index.</p>
+    </div>
+  </div>
+
+  <div id="live-body" hidden>
+    <div class="tiles">
+      <article class="tile tone-orange">
+        <span class="label"><i class="ico">◔</i>Stall index (WSI)</span>
+        <div class="big"><span id="wsi-value">–</span><small>% of time lost</small></div>
+        <span id="wsi-state" class="chip">–</span>
+      </article>
+      <article class="tile tone-violet">
+        <span class="label"><i class="ico">⌖</i>Likely cause</span>
+        <div class="big cause" id="cause-value">–</div>
+        <p id="cause-why" class="muted small">–</p>
+      </article>
+      <article class="tile tone-aqua">
+        <span class="label"><i class="ico">⇢</i>What SmartSwap would do</span>
+        <ol class="ladder" id="ladder">
+          <li data-level="0"><b>Watch</b><span>No action needed</span></li>
+          <li data-level="1"><b>Hint</b><span>Lower background priority</span></li>
+          <li data-level="2"><b>Cap</b><span>Limit background CPU rate</span></li>
+        </ol>
+      </article>
+    </div>
+    <div class="grid2">
+      <article class="card">
+        <div class="card-head"><h2>Stall index, last 60 s</h2><div class="legend"><span><i class="sw s1"></i>WSI</span><span><i class="sw dash"></i>engage 5%</span><span><i class="sw dot2"></i>target 3%</span></div></div>
+        <div id="wsi-chart" class="chart" role="img" aria-label="Line chart of the stall index over the last 60 seconds"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>Where the canary loses time</h2><span class="muted small">now vs. idle calibration</span></div>
+        <div id="components" class="components"></div>
+      </article>
+    </div>
+  </div>
+
+  <div class="tiles">
+    <article class="tile tone-blue">
+      <span class="label"><i class="ico">▦</i>CPU in use</span>
+      <div class="big"><span id="cpu-value">–</span><small>%</small></div>
+      <div class="spark" id="cpu-spark" aria-hidden="true"></div>
+    </article>
+    <article class="tile tone-orange">
+      <span class="label"><i class="ico">▤</i>Memory in use</span>
+      <div class="big"><span id="mem-value">–</span><small>%</small></div>
+      <div class="meter" id="mem-meter-wrap"><i id="mem-meter"></i></div>
+      <p class="muted small" id="mem-detail">–</p>
+    </article>
+    <article class="tile tone-aqua">
+      <span class="label"><i class="ico">◫</i>Commit charge</span>
+      <div class="big"><span id="commit-value">–</span><small>GB</small></div>
+      <div class="meter" id="commit-meter-wrap"><i id="commit-meter"></i></div>
+      <p class="muted small" id="commit-detail">–</p>
+    </article>
+  </div>
+
+  <div class="grid2">
+    <article class="card">
+      <div class="card-head"><h2>CPU and memory, last 2 minutes</h2><div class="legend"><span><i class="sw s1"></i>CPU %</span><span><i class="sw s2"></i>memory %</span></div></div>
+      <div id="sys-chart" class="chart" role="img" aria-label="CPU and memory use over the last two minutes"></div>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Busiest processes right now</h2><span class="muted small">share of total CPU</span></div>
+      <ol class="procs" id="processes"><li class="muted">Measuring…</li></ol>
+    </article>
+  </div>
+
+  <article class="card">
+    <div class="card-head"><h2>How SmartSwap decides</h2><span class="muted small">every 200 ms</span></div>
+    <ol class="steps">
+      <li class="tone-blue"><span class="step-n">1</span><b>Feel it</b><p>A tiny canary task wakes every 40 ms and times its scheduling delay, compute, memory copy and disk read.</p></li>
+      <li class="tone-violet"><span class="step-n">2</span><b>Name it</b><p>Whichever part slowed down tells the cause: waiting for a core means CPU, a slow copy means memory bandwidth, a slow read means storage.</p></li>
+      <li class="tone-orange"><span class="step-n">3</span><b>Fix it cheaply</b><p>First lower background priority. Only if that is not enough, cap background CPU and tune the cap up and down.</p></li>
+      <li class="tone-aqua"><span class="step-n">4</span><b>Prove it</b><p>Read every change back from Windows, check the stall actually dropped, and undo anything that did not help.</p></li>
+    </ol>
+  </article>
+</section>
+
+<!-- EXPERIMENT -->
+<section id="page-experiment" class="page" aria-labelledby="h-exp">
+  <div class="page-head"><div>
+    <h1 id="h-exp">Run a controlled experiment</h1>
+    <p class="lede">SmartSwap starts its own bounded background workload and a foreground probe, applies one policy to the background only, and measures the probe's tail latency <em>and</em> what the policy cost the background. Every action is verified by reading it back from Windows, then reverted.</p>
+  </div></div>
+
+  <form id="trial-form" class="card form">
+    <fieldset>
+      <legend>1. Background interference</legend>
+      <div class="choices" id="preset-choices"></div>
+    </fieldset>
+    <fieldset>
+      <legend>2. Mitigation policy</legend>
+      <div class="choices" id="policy-choices"></div>
+    </fieldset>
+    <div class="form-actions">
+      <button class="btn primary" id="run-trial" type="submit">Run one trial (~10 s)</button>
+      <button class="btn" id="run-paired" type="button">Compare with no mitigation (5 pairs, ~2 min)</button>
+      <span id="trial-status" class="muted small" role="status"></span>
+    </div>
+    <div class="progress" id="progress" hidden><i></i></div>
+  </form>
+
+  <article class="card" id="trial-result" hidden></article>
+  <article class="card" id="comparison-data" hidden></article>
+
+  <article class="card">
+    <div class="card-head"><h2>Recent trials</h2><button class="btn ghost small" type="button" id="refresh-runs">Refresh</button></div>
+    <div class="table-wrap"><table class="table" id="runs-table"><thead><tr><th>When</th><th>Workload</th><th>Policy</th><th class="num">p95 (ms)</th><th class="num">Actions verified</th><th></th></tr></thead><tbody></tbody></table></div>
+  </article>
+</section>
+
+<!-- EVIDENCE -->
+<section id="page-evidence" class="page" aria-labelledby="h-ev">
+  <div class="page-head"><div>
+    <h1 id="h-ev">What the study shows</h1>
+    <p class="lede">A randomised block study: every workload × policy pair runs once per block, in random order. Results are medians of per-block ratios with 95% bootstrap intervals and exact Wilcoxon tests, Holm-corrected across every comparison.</p>
+  </div></div>
+  <div id="study-progress"></div>
+  <div id="research-data"><p class="muted">Loading study…</p></div>
+</section>
+
+<!-- REPORTS -->
+<section id="page-reports" class="page" aria-labelledby="h-rep">
+  <div class="page-head"><div>
+    <h1 id="h-rep">Reports and safety</h1>
+    <p class="lede">Everything SmartSwap measured or did is stored locally in SQLite and can be exported.</p>
+  </div></div>
+  <div class="grid2">
+    <article class="card">
+      <h2>Export the ledger</h2>
+      <div class="exports"><a class="btn" href="/api/export/csv">CSV</a><a class="btn" href="/api/export/json">JSON</a><a class="btn" href="/api/export/html">HTML</a><a class="btn" href="/api/export/pdf">PDF summary</a></div>
+      <p class="muted small">Database: <code>smartswap/data/smartswap.db</code></p>
+    </article>
+    <article class="card">
+      <h2>Safety guarantees</h2>
+      <ul class="checks">
+        <li>Acts only on background processes SmartSwap itself started.</li>
+        <li>Never raises a priority; never needs administrator rights.</li>
+        <li>Every action and every revert is read back from Windows.</li>
+        <li>No page-file, standby-list, service, or system-setting changes.</li>
+      </ul>
+      <button class="btn danger" type="button" id="cleanup">Emergency stop: end all SmartSwap workloads</button>
+    </article>
+  </div>
+  <article class="card">
+    <div class="card-head"><h2>Native capability scan</h2><span id="api-count" class="muted small"></span></div>
+    <div id="caps" class="caps"></div>
+  </article>
+</section>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="tooltip" class="tooltip" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

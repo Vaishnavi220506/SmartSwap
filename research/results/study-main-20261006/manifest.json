@@ -1,0 +1,243 @@
+{
+  "study_id": "study-main-20261006",
+  "seed": 20261006,
+  "blocks": 10,
+  "design": "randomised complete block",
+  "cells": [
+    [
+      "idle",
+      "none"
+    ],
+    [
+      "idle",
+      "observe"
+    ],
+    [
+      "idle",
+      "nice"
+    ],
+    [
+      "idle",
+      "static"
+    ],
+    [
+      "idle",
+      "adaptive"
+    ],
+    [
+      "cpu",
+      "none"
+    ],
+    [
+      "cpu",
+      "observe"
+    ],
+    [
+      "cpu",
+      "nice"
+    ],
+    [
+      "cpu",
+      "static"
+    ],
+    [
+      "cpu",
+      "adaptive"
+    ],
+    [
+      "membw",
+      "none"
+    ],
+    [
+      "membw",
+      "observe"
+    ],
+    [
+      "membw",
+      "nice"
+    ],
+    [
+      "membw",
+      "static"
+    ],
+    [
+      "membw",
+      "adaptive"
+    ],
+    [
+      "io",
+      "none"
+    ],
+    [
+      "io",
+      "observe"
+    ],
+    [
+      "io",
+      "nice"
+    ],
+    [
+      "io",
+      "static"
+    ],
+    [
+      "io",
+      "adaptive"
+    ],
+    [
+      "mixed",
+      "none"
+    ],
+    [
+      "mixed",
+      "observe"
+    ],
+    [
+      "mixed",
+      "nice"
+    ],
+    [
+      "mixed",
+      "static"
+    ],
+    [
+      "mixed",
+      "adaptive"
+    ],
+    [
+      "cpu",
+      "adaptive_noladder"
+    ],
+    [
+      "cpu",
+      "adaptive_noaimd"
+    ],
+    [
+      "cpu",
+      "adaptive_nobenefit"
+    ],
+    [
+      "membw",
+      "adaptive_noladder"
+    ],
+    [
+      "membw",
+      "adaptive_noaimd"
+    ],
+    [
+      "membw",
+      "adaptive_nobenefit"
+    ],
+    [
+      "mixed",
+      "adaptive_noladder"
+    ],
+    [
+      "mixed",
+      "adaptive_noaimd"
+    ],
+    [
+      "mixed",
+      "adaptive_nobenefit"
+    ]
+  ],
+  "presets": {
+    "idle": [],
+    "cpu": [
+      [
+        "cpu",
+        32
+      ]
+    ],
+    "membw": [
+      [
+        "membw",
+        8
+      ]
+    ],
+    "io": [
+      [
+        "io",
+        16
+      ]
+    ],
+    "mixed": [
+      [
+        "cpu",
+        16
+      ],
+      [
+        "membw",
+        4
+      ],
+      [
+        "io",
+        4
+      ]
+    ]
+  },
+  "policies": {
+    "none": "No mitigation",
+    "observe": "SmartSwap canary + controller, actions disabled (overhead/attribution)",
+    "nice": "Static deprioritisation: IDLE priority class + very-low I/O priority on all background work",
+    "static": "SmartSwap v1: unconditional 35% Job CPU-rate cap + ABOVE_NORMAL foreground",
+    "adaptive": "SmartSwap v2: WSI-gated, attribution-routed ladder with AIMD CPU-rate control",
+    "adaptive_noaimd": "Ablation: v2 ladder with a fixed 50% cap (no AIMD)",
+    "adaptive_noladder": "Ablation: v2 AIMD cap without the resource-matched hint stage",
+    "adaptive_nobenefit": "Ablation: v2 without benefit verification (ineffective caps are kept)"
+  },
+  "foreground": {
+    "SS_INTERVAL": "0.05",
+    "SS_WARMUP": "1.0",
+    "SS_DURATION": "6.0",
+    "SS_COMPUTE_ITERS": "12000",
+    "SS_MEM_BYTES": "8388608"
+  },
+  "canary": {
+    "SS_INTERVAL": "0.04",
+    "SS_WARMUP": "0.4",
+    "SS_DURATION": "0",
+    "SS_COMPUTE_ITERS": "3000",
+    "SS_MEM_BYTES": "8388608",
+    "SS_STREAM": "1"
+  },
+  "control_period_s": 0.2,
+  "controller": {
+    "window_beats": 8,
+    "engage_wsi": 5.0,
+    "release_wsi": 2.0,
+    "engage_periods": 2,
+    "release_periods": 25,
+    "release_periods_max": 50,
+    "flap_window_periods": 25,
+    "slo_wsi": 3.0,
+    "cap_initial": 50.0,
+    "cap_min": 5.0,
+    "cap_max": 100.0,
+    "md_factor": 0.6,
+    "ai_step": 5.0,
+    "md_holdoff_periods": 2,
+    "ladder_hold_periods": 3,
+    "attribution_floor": 1.0,
+    "benefit_eval_periods": 8,
+    "benefit_min_reduction": 0.3,
+    "ineffective_cooldown_periods": 50,
+    "enable_aimd": true,
+    "enable_benefit_check": true,
+    "enable_ladder": true,
+    "act": true
+  },
+  "static_cap_percent": 35.0,
+  "host": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.14.3",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285H",
+    "logical_cpus": 16,
+    "physical_cpus": 16,
+    "ram_gb": 31.4,
+    "on_ac_power": true,
+    "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+    "git_commit": "8ca50b15a85b2d34ab01ba88ac96b262eacff0cd"
+  },
+  "started": "2026-10-06T09:54:57+0530"
+}
