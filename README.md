@@ -66,6 +66,3 @@ tests/       pytest suite (controller logic, statistics, API)
 docs/        AUDIT_V1.md - why the v1 results were invalid
 ```
 
-## A note on v1
-
-An earlier version reported improvements that turned out to be measurement artefacts: its CPU workload never actually ran, and its control used the same workload as the treatment. `docs/AUDIT_V1.md` explains every defect and the guard that now prevents it.
