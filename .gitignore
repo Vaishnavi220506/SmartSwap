@@ -8,3 +8,12 @@ data/
 *.pid
 *.zip
 *.tmp
+# kept locally, not part of the code repository
+paper/
+presentation/
+research/results/
+CAPABILITY_REPORT.json
+ENVIRONMENT_REPORT.md
+MISSING_DEPENDENCIES.md
+PROJECT_STATUS.md
+VALIDATION_REPORT.md

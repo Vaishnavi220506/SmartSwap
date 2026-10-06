@@ -1,9 +1,0 @@
-{
-  "platform": "Windows 11 build 26200 x64",
-  "monitoring": "available",
-  "elevation_required_for_monitoring": false,
-  "python": "3.14.3",
-  "native_apis": {"kernel32.dll": true, "psapi.dll": true, "pdh.dll": true, "advapi32.dll": true, "GlobalMemoryStatusEx": true, "CreateMemoryResourceNotification": true, "CreateJobObjectW": true, "AssignProcessToJobObject": true, "SetPriorityClass": true, "GetPriorityClass": true},
-  "sqlite": "available",
-  "limitations": ["PDH counters are detected but the first release uses GlobalMemoryStatusEx plus psutil for stable cross-build telemetry.", "Job Objects are detected but the safe demo currently verifies reversible priority control only."]
-}
