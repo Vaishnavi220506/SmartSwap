@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
 from collections import Counter
 
 # Two-sided 95% Student t critical values t_{0.975, df}.
@@ -92,3 +93,49 @@ def spearman(x: list[float], y: list[float], permutations: int = 5000, seed: int
         rng.shuffle(shuffled)
         if abs(pearson(rx, shuffled)) >= abs(rho) - 1e-12: hits += 1
     return rho, (hits + 1) / (permutations + 1)
+
+
+def sign_test(wins: int, losses: int) -> float:
+    """Exact two-sided binomial sign test (ties dropped). For paired binary
+    outcomes, wins/losses are the discordant pairs, so this is the exact McNemar test."""
+    n = wins + losses
+    if n == 0: return 1.0
+    k = min(wins, losses)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def blocks_for_power(log_ratios: list[float], alpha: float = 0.05, power: float = 0.8) -> int | None:
+    """Blocks a paired Wilcoxon test would need to detect the observed effect.
+
+    Normal approximation on the per-block log ratio (effect = mean / sd), inflated
+    by the Wilcoxon test's asymptotic relative efficiency (3/pi) under normality.
+    None when there is no effect to detect or too few blocks to estimate it.
+    """
+    if len(log_ratios) < 3: return None
+    mean, sd = statistics.fmean(log_ratios), statistics.stdev(log_ratios)
+    if mean == 0: return None
+    if sd == 0: return 3
+    z = statistics.NormalDist()
+    n = ((z.inv_cdf(1 - alpha / 2) + z.inv_cdf(power)) * sd / abs(mean)) ** 2 / (3 / math.pi)
+    return max(3, math.ceil(n))
+
+
+def hierarchical_bootstrap_median(groups: list[list[float]], resamples: int = 10000, seed: int = 13) -> tuple[float, float, float]:
+    """Median and 95% CI when values are nested in groups (blocks within hosts).
+
+    Each resample draws hosts with replacement, then blocks with replacement
+    within each drawn host, so between-host variation widens the interval
+    instead of being mistaken for more independent data.
+    """
+    groups = [g for g in groups if g]
+    if not groups: return (math.nan, math.nan, math.nan)
+    rng = random.Random(seed); stats = []
+    for _ in range(resamples):
+        sample = []
+        for _ in groups:
+            g = groups[rng.randrange(len(groups))]
+            sample += [g[rng.randrange(len(g))] for _ in g]
+        stats.append(statistics.median(sample))
+    stats.sort()
+    return statistics.median(v for g in groups for v in g), stats[int(0.025 * resamples)], stats[int(0.975 * resamples) - 1]

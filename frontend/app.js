@@ -131,6 +131,8 @@ async function refreshLive() {
   const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
   const cause = CAUSE[top && wsi >= th.slo_wsi ? top[0] : 'none'];
   $('#cause-value').textContent = cause[0]; $('#cause-why').textContent = cause[1];
+  const culprit = (s.suspects || []).find((x) => !x.protected && x.score > 0.05);
+  $('#culprit-value').textContent = culprit && wsi >= th.slo_wsi ? `${culprit.name} (${pct(culprit.share_hot)} of ${top ? top[0] : 'matched'} use while stalled${s.governing ? ', governed' : ''})` : 'none';
   document.querySelectorAll('#ladder li').forEach((li) => li.classList.toggle('on', Number(li.dataset.level) === s.would_level));
   const t0 = s.trace[0].t; const xs = s.trace.map((r) => r.t - t0);
   const shade = []; let start = null;

@@ -12,6 +12,10 @@ under %LOCALAPPDATA% rather than the repository, because a synced folder
 copy the finished study into smartswap/research/results/ afterwards.
 
     python -m research.run_study --blocks 10
+    python -m research.run_study --design ecoqos --blocks 10     # vs. Windows 11 Efficiency mode
+    python -m research.run_study --design real --blocks 8        # real tools as background work
+    python -m research.run_study --design realapp --blocks 8     # foreground = a real app's UI latency
+    python -m research.run_study --design blame --blocks 10      # who is the culprit? (ground truth)
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from pathlib import Path
 import psutil
 
 from backend.controller import ControllerConfig
-from backend.engine import CANARY_ENV, CONTROL_PERIOD_S, FG_ENV, POLICIES, PRESETS, STATIC_CAP_PERCENT, calibrate_canary, run_trial
+from backend.engine import ALL_PRESETS, CANARY_ENV, CONTROL_PERIOD_S, FG_ENV, POLICIES, REAL_PRESETS, STATIC_CAP_PERCENT, calibrate_canary, run_trial
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "SmartSwap" / "results"
@@ -45,12 +49,30 @@ HYBRID_PRESETS = ["cpu", "membw", "mixed"]
 HYBRID_POLICIES = ["none", "nice", "ecore", "adaptive", "adaptive_hybrid"]
 
 
+ECOQOS_PRESETS = ["cpu", "membw", "io", "mixed"]
+ECOQOS_POLICIES = ["none", "nice", "ecoqos", "adaptive", "adaptive_eco"]
+REAL_POLICIES = ["none", "observe", "nice", "ecoqos", "adaptive", "adaptive_eco"]
+REALAPP_PRESETS = ["idle", "cpu", "membw", "io", "mixed"]
+REALAPP_POLICIES = ["none", "observe", "nice", "adaptive"]
+BLAME_MODES = ["none", "oracle", "top_cpu", "passive", "interventional"]
+DESIGNS = ["main", "slo-sweep", "hybrid", "ecoqos", "real", "realapp", "blame"]
+
+
 def cells(design: str = "main") -> list[tuple[str, str]]:
+    if design == "ecoqos":  # the OS's own answer to background work, as a baseline and as a ladder rung
+        return [(preset, policy) for preset in ECOQOS_PRESETS for policy in ECOQOS_POLICIES]
+    if design == "real":  # real tools instead of synthetic workers; "idle" is the no-interference control
+        return [("idle", "none"), ("idle", "observe")] + [(preset, policy) for preset in REAL_PRESETS for policy in REAL_POLICIES]
+    if design == "realapp":  # foreground is a real, unmodified application's UI thread
+        return [(preset, policy) for preset in REALAPP_PRESETS for policy in REALAPP_POLICIES]
+    if design == "blame":  # culprit identification among every process on the desktop
+        from backend.govern import scenarios
+        return [(scenario, mode) for scenario in scenarios() for mode in BLAME_MODES]
     if design == "slo-sweep":  # protection-vs-cost frontier of the v2 SLO knob
         return [(preset, policy) for preset in SWEEP_PRESETS for policy in SWEEP_POLICIES]
     if design == "hybrid":  # core-class steering: mechanism (ecore) and controller (adaptive_hybrid)
         return [(preset, policy) for preset in HYBRID_PRESETS for policy in HYBRID_POLICIES]
-    main = [(preset, policy) for preset in PRESETS for policy in MAIN_POLICIES]
+    main = [(preset, policy) for preset in ["idle", "cpu", "membw", "io", "mixed"] for policy in MAIN_POLICIES]
     return main + [(preset, policy) for preset in ABLATION_PRESETS for policy in ABLATION_POLICIES]
 
 
@@ -86,15 +108,17 @@ def main() -> None:
     ap.add_argument("--study-id", default=None)
     ap.add_argument("--settle", type=float, default=0.5, help="extra idle seconds between trials (plus a 1 s load sample)")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    ap.add_argument("--design", choices=["main", "slo-sweep", "hybrid"], default="main")
+    ap.add_argument("--design", choices=DESIGNS, default="main")
+    ap.add_argument("--foreground", default=None, help='"probe" or "ui:<exe>" (default: ui:notepad.exe for realapp, probe otherwise)')
     args = ap.parse_args()
+    foreground = args.foreground or ("ui:notepad.exe" if args.design == "realapp" else "probe")
     study_id = args.study_id or time.strftime("study-%Y%m%d-%H%M%S")
     out = args.out / study_id; out.mkdir(parents=True, exist_ok=True)
     trials_path = out / "trials.jsonl"; manifest_path = out / "manifest.json"
     if not manifest_path.exists():
         manifest_path.write_text(json.dumps({
             "study_id": study_id, "seed": args.seed, "blocks": args.blocks, "design": "randomised complete block",
-            "design_name": args.design, "cells": cells(args.design), "presets": {k: v for k, v in PRESETS.items()}, "policies": POLICIES,
+            "design_name": args.design, "cells": cells(args.design), "presets": {k: v for k, v in ALL_PRESETS.items()}, "policies": POLICIES, "foreground_mode": foreground,
             "foreground": FG_ENV, "canary": CANARY_ENV, "control_period_s": CONTROL_PERIOD_S,
             "controller": ControllerConfig().__dict__, "static_cap_percent": STATIC_CAP_PERCENT,
             "host": host_manifest(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -110,7 +134,12 @@ def main() -> None:
         for position, (preset, policy) in enumerate(order):
             if (block, preset, policy) in finished: continue
             host_load = psutil.cpu_percent(interval=1.0)  # covariate: non-study load just before the trial
-            result = run_trial(preset, policy, cal, seed=block * 100 + position)
+            if args.design == "blame":
+                from backend.govern import run_blame_trial
+                result = run_blame_trial(preset, policy, cal, seed=block * 100 + position)
+                result.update(preset=preset, policy=policy, background_units_per_s={})
+            else:
+                result = run_trial(preset, policy, cal, seed=block * 100 + position, foreground=foreground)
             result.update(block=block, position=position, study_id=study_id, host_cpu_pct_before=host_load)
             with trials_path.open("a", encoding="utf-8") as handle: handle.write(json.dumps(result) + "\n")
             count += 1

@@ -214,11 +214,14 @@ def live_state() -> dict[str, Any]:
 
 
 @app.post("/api/live/start")
-def live_start() -> dict[str, Any]:
+def live_start(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start the live canary. {"govern": true, "allow": ["name.exe", ...]} opts in to lowering confirmed culprits."""
     if TRIAL_LOCK.locked(): raise HTTPException(409, "a trial is running; live monitoring would disturb it")
+    payload = payload or {}; allow = payload.get("allow")
+    if allow is not None and (not isinstance(allow, list) or not all(isinstance(a, str) and a.lower().endswith(".exe") for a in allow)): raise HTTPException(400, "allow must be a list of .exe names")
     cal = load_calibration()
-    engine.LIVE_MONITOR.start(Calibration(**cal["canary_idle_median_ms"]))
-    return {"running": True}
+    engine.LIVE_MONITOR.start(Calibration(**cal["canary_idle_median_ms"]), govern=bool(payload.get("govern")), allow=set(allow) if allow else None)
+    return {"running": True, "governing": bool(payload.get("govern"))}
 
 
 @app.post("/api/live/stop")

@@ -34,6 +34,10 @@ Escalation ladder (cheapest action first)
              keeps working, but the foreground gets the P-cores (and, on
              hosts with a separate low-power island, less cache sharing).
              Benefit-checked like the cap and undone if it does not help.
+    level 1.6 (optional): EcoQoS - the Windows 11 "Efficiency mode" execution-
+             speed throttle on the governed group (lower clocks, E-core bias).
+             Same benefit check. It is also a stand-alone baseline (`ecoqos`),
+             because it is what the OS itself offers for background work.
     level 2: Job Object hard CPU-rate cap, adapted by AIMD against the SLO,
              entered only if the SLO stays violated under level 1.
 
@@ -60,6 +64,8 @@ from typing import Any
 COMPONENTS = ("sched", "cpu", "mem", "io")
 RESOURCES = ("cpu", "mem", "io")
 HINTS = {"cpu": "priority", "mem": "priority", "io": "io_priority"}  # level-1 action per resource
+RUNGS = ("steer", "eco")  # benefit-checked intermediate rungs, tried in order before a cap
+RUNG_TEXT = {"steer": "E-core steering", "eco": "EcoQoS (Efficiency mode)"}
 
 
 @dataclass
@@ -107,6 +113,7 @@ class ControllerConfig:
     enable_aimd: bool = True           # ablation: False -> fixed cap_initial
     enable_benefit_check: bool = True  # ablation: False -> keep caps regardless
     enable_steer: bool = False         # hybrid CPUs: try E-core steering before capping
+    enable_eco: bool = False           # try EcoQoS (Efficiency mode) before capping
     enable_ladder: bool = True         # ablation: False -> jump straight to the cap
     act: bool = True                   # False -> observe only (overhead/attribution study)
 
@@ -169,10 +176,9 @@ class Controller:
     cap_blocked_until: int = -1
     period_index: int = 0
     rollbacks: int = 0
-    steer_tried: bool = False
-    steer_periods: int | None = None
-    steer_baseline_wsi: float | None = None
-    steer_rollbacks: int = 0
+    rungs_tried: set[str] = field(default_factory=set)
+    rung_eval: dict[str, list[Any]] = field(default_factory=dict)  # rung -> [periods applied, baseline WSI] while under evaluation
+    rung_rollbacks: dict[str, int] = field(default_factory=dict)
     trace: list[dict[str, Any]] = field(default_factory=list)
 
     def step(self, t_ms: float, rows: list[dict[str, float]], group_active: bool | None = None) -> list[Decision]:
@@ -205,13 +211,13 @@ class Controller:
             if resource not in ("none", self.resource) and violated and HINTS[resource] not in self.hints and self.cfg.enable_ladder:
                 self.resource = resource  # interference changed character; add its matched hint
                 decisions += self._hint(resource, f"re-attributed to {resource} (excess {strength:.2f}x)")
-            if "steer" in self.hints and self.steer_periods is not None and self.cfg.enable_benefit_check:
-                self.steer_periods += 1
-                if self.steer_periods == self.cfg.benefit_eval_periods and self.steer_baseline_wsi:
-                    after = statistics.fmean(self.wsi_history[-5:]); self.steer_periods = None
-                    if after > (1 - self.cfg.benefit_min_reduction) * self.steer_baseline_wsi:
-                        self.steer_rollbacks += 1; self.hints.discard("steer"); self.since_change = 0
-                        decisions.append(Decision("hint_revert", "steer", None, f"benefit check failed: mean WSI {self.steer_baseline_wsi:.1f}% -> {after:.1f}%; E-core steering undone"))
+            for rung in [r for r in RUNGS if r in self.rung_eval and r in self.hints and self.cfg.enable_benefit_check]:
+                self.rung_eval[rung][0] += 1
+                if self.rung_eval[rung][0] == self.cfg.benefit_eval_periods:
+                    baseline = self.rung_eval.pop(rung)[1]; after = statistics.fmean(self.wsi_history[-5:])
+                    if baseline and after > (1 - self.cfg.benefit_min_reduction) * baseline:
+                        self.rung_rollbacks[rung] = self.rung_rollbacks.get(rung, 0) + 1; self.hints.discard(rung); self.since_change = 0
+                        decisions.append(Decision("hint_revert", rung, None, f"benefit check failed: mean WSI {baseline:.1f}% -> {after:.1f}%; {RUNG_TEXT[rung]} undone"))
             if self.level == 2 and self.cap is not None and self.cfg.enable_benefit_check:
                 self.cap_periods += 1
                 if self.cap_periods == self.cfg.benefit_eval_periods and self.cap_baseline_wsi:
@@ -239,7 +245,11 @@ class Controller:
         return decisions if self.cfg.act else []
 
     def _trace_row(self, t_ms: float, wsi: float, m: dict[str, Any], resource: str, strength: float, decisions: list[Decision]) -> dict[str, Any]:
-        return {"t_ms": round(t_ms, 1), "release_hold": self.release_hold, "wsi": wsi, "excess": m["excess"], "attributed": resource, "strength": strength, "engaged": self.engaged, "level": self.level, "cap": self.cap, "steered": "steer" in self.hints, "decisions": [d.kind for d in decisions]}
+        return {"t_ms": round(t_ms, 1), "release_hold": self.release_hold, "wsi": wsi, "excess": m["excess"], "attributed": resource, "strength": strength, "engaged": self.engaged, "level": self.level, "cap": self.cap, "steered": "steer" in self.hints, "eco": "eco" in self.hints, "decisions": [d.kind for d in decisions]}
+
+    @property
+    def steer_rollbacks(self) -> int:
+        return self.rung_rollbacks.get("steer", 0)
 
     def _escalate(self, reason: str) -> list[Decision]:
         self.since_change = 0
@@ -247,11 +257,13 @@ class Controller:
             self.level = 1
             hint = self._hint(self.resource, reason)
             if hint: return hint
-        if self.cfg.enable_steer and self.cfg.enable_ladder and not self.steer_tried and self.resource in ("cpu", "mem"):
-            self.steer_tried = True; self.steer_periods = 0
-            self.steer_baseline_wsi = statistics.fmean(self.wsi_history[-5:]) if self.wsi_history else None
-            self.hints.add("steer")
-            return [Decision("hint", "steer", None, reason + "; trying E-core steering before a cap")]
+        enabled = {"steer": self.cfg.enable_steer, "eco": self.cfg.enable_eco}
+        for rung in RUNGS:  # one benefit-checked rung at a time; CPU-side rungs cannot help storage stalls
+            if enabled[rung] and self.cfg.enable_ladder and rung not in self.rungs_tried and self.resource in ("cpu", "mem"):
+                self.rungs_tried.add(rung)
+                self.rung_eval[rung] = [0, statistics.fmean(self.wsi_history[-5:]) if self.wsi_history else None]
+                self.hints.add(rung)
+                return [Decision("hint", rung, None, reason + f"; trying {RUNG_TEXT[rung]} before a cap")]
         self.level = 2; self.cap_periods = 0
         self.cap_baseline_wsi = statistics.fmean(self.wsi_history[-5:]) if self.wsi_history else None
         return [self._set_cap(self.cfg.cap_initial, reason)]
@@ -269,5 +281,5 @@ class Controller:
         out = [Decision("cap_clear", self.resource, None, reason)] if self.cap is not None else []
         out += [Decision("hint_revert", h, None, reason) for h in sorted(self.hints)]
         self.engaged = False; self.level = 0; self.cap = None; self.hints = set(); self.resource = "none"; self.hot = 0; self.since_release = 0
-        self.steer_tried = False; self.steer_periods = None
+        self.rungs_tried = set(); self.rung_eval = {}
         return out

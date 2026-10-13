@@ -233,3 +233,56 @@ def set_affinity(pid: int, mask: int) -> bool:
         if not proc or not k.SetProcessAffinityMask(proc, mask): return False
     observed = get_affinity(pid)
     return observed is not None and observed[0] == mask
+
+
+# --- EcoQoS (Windows 11 "Efficiency mode") ---------------------------------
+ProcessPowerThrottling = 4
+PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1
+PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+
+
+class _PowerThrottling(ctypes.Structure):
+    _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+
+
+def get_power_throttling(pid: int) -> tuple[int, int] | None:
+    """(ControlMask, StateMask) of a process's power-throttling policy; None if unreadable (pre-Windows 11)."""
+    if not IS_WINDOWS: return None
+    k = _kernel32(); state = _PowerThrottling(PROCESS_POWER_THROTTLING_CURRENT_VERSION, 0, 0)
+    with _Process(pid, PROCESS_QUERY_LIMITED_INFORMATION) as proc:
+        if not proc or not k.GetProcessInformation(proc, ProcessPowerThrottling, ctypes.byref(state), ctypes.sizeof(state)): return None
+    return int(state.ControlMask), int(state.StateMask)
+
+
+def set_power_throttling(pid: int, on: bool | None) -> bool:
+    """EcoQoS execution-speed throttling: True = on, False = explicitly off, None = let the OS decide.
+
+    This is the mechanism behind Task Manager's Efficiency mode (which also sets
+    IDLE priority). Verified by read-back.
+    """
+    if not IS_WINDOWS: return False
+    k = _kernel32()
+    control = 0 if on is None else PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+    state = PROCESS_POWER_THROTTLING_EXECUTION_SPEED if on else 0
+    requested = _PowerThrottling(PROCESS_POWER_THROTTLING_CURRENT_VERSION, control, state)
+    with _Process(pid, PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION) as proc:
+        if not proc or not k.SetProcessInformation(proc, ProcessPowerThrottling, ctypes.byref(requested), ctypes.sizeof(requested)): return False
+    observed = get_power_throttling(pid)
+    return observed is not None and (observed[0] & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == control and (observed[1] & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == state
+
+
+# --- Foreground window -------------------------------------------------------
+def _user32() -> ctypes.WinDLL:
+    u = ctypes.WinDLL("user32.dll", use_last_error=True)
+    u.GetForegroundWindow.restype = wintypes.HWND
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]; u.GetWindowThreadProcessId.restype = wintypes.DWORD
+    return u
+
+
+def foreground_pid() -> int | None:
+    """PID that owns the window the user is interacting with; never governed."""
+    if not IS_WINDOWS: return None
+    u = _user32(); hwnd = u.GetForegroundWindow()
+    if not hwnd: return None
+    pid = wintypes.DWORD(); u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return int(pid.value) or None

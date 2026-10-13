@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 
 from backend.engine import summarize_rows
-from backend.stats import bootstrap_median_ci, holm, rank, spearman, wilcoxon_signed_rank
+from backend.stats import blocks_for_power, bootstrap_median_ci, holm, rank, spearman, wilcoxon_signed_rank
 
 PRESET_ORDER = ["idle", "cpu", "membw", "io", "mixed"]
 PRESET_NAME = {"idle": "No interference", "cpu": "CPU", "membw": "Memory bandwidth", "io": "Storage reads", "mixed": "Mixed"}
@@ -114,7 +114,8 @@ def compare(idx, preset: str, a: str, b: str, metric: str = "p95_ms") -> dict[st
     return {"preset": preset, "policy": a, "reference": b, "metric": metric, "n": len(blocks),
             "median_a": statistics.median(va), "median_b": statistics.median(vb),
             "median_ratio": statistics.median(ratios), "ci_low": lo, "ci_high": hi, "p": wilcoxon_p([x - y for x, y in zip(va, vb)]),
-            "bg_retained_median": statistics.median(ret) if ret else None, "bg_retained_ci": [rlo, rhi]}
+            "bg_retained_median": statistics.median(ret) if ret else None, "bg_retained_ci": [rlo, rhi],
+            "blocks_for_80pct_power": blocks_for_power([math.log(r) for r in ratios if r > 0])}
 
 
 def attribution_matrix(trials: list[dict[str, Any]], engage_wsi: float) -> dict[str, dict[str, int]]:
@@ -518,6 +519,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(); ap.add_argument("study", type=Path); ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     design = json.loads((args.study / "manifest.json").read_text(encoding="utf-8")).get("design_name", "main")
+    if design in ("ecoqos", "real", "realapp", "blame"):
+        from research.designs import analyse_design
+        out = args.out or args.study / "analysis"; analyse_design(design, args.study, out); print(out / "RESULTS.md"); return
     if design == "hybrid":
         analyse_hybrid(args.study, args.out or args.study / "analysis"); print((args.out or args.study / "analysis") / "hybrid_summary.json"); return
     if design == "slo-sweep":
