@@ -95,3 +95,37 @@ def test_eco_rung_is_tried_before_the_cap_and_rolled_back_if_useless() -> None:
         kinds += [d.kind + ":" + d.resource for d in ctl.step(i * 200.0, rows, True)]
     assert kinds[:2] == ["hint:priority", "hint:eco"]
     assert "hint_revert:eco" in kinds and ctl.rung_rollbacks == {"eco": 1}
+
+
+def simulate(it, base, effects: dict[int, float], ranked: list[Suspect], periods: int) -> list[float]:
+    """Drive an interrogator against a toy desktop: WSI = base(t) + effect of every un-nudged culprit."""
+    history: list[float] = []
+    for t in range(periods):
+        wsi = base(t) + sum(e for app, e in effects.items() if app not in it.nudged)
+        history.append(wsi)
+        it.step(True, "cpu", history, ranked)
+    return history
+
+
+def test_factorial_confirms_the_culprit_and_clears_the_innocent() -> None:
+    from backend.blame import FactorialInterrogator
+    it = FactorialInterrogator(seed=1)
+    simulate(it, lambda t: 2.0, {1: 8.0}, [suspect(2, 0.9), suspect(1, 0.5)], 40)
+    verdicts = {v["app"]: v for v in it.verdicts}
+    assert verdicts[1]["verdict"] == "confirmed" and verdicts[1]["bill_ms_per_s"] > 50
+    assert verdicts[2]["verdict"] == "exonerated" and it.nudged == {1: "priority"}
+
+
+def test_randomization_resists_a_load_drop_that_fools_the_one_at_a_time_test() -> None:
+    from backend.blame import FactorialInterrogator
+    drop = lambda t: 12.0 if t < 6 else 3.0          # background load halves right after testing starts
+    ranked = [suspect(2, 0.9), suspect(1, 0.5)]      # the innocent app is ranked first
+    seq = Interrogator("interventional", eval_periods=8)
+    simulate(seq, drop, {1: 4.0}, ranked, 12)
+    assert seq.verdicts[0]["app"] == 2 and seq.verdicts[0]["verdict"] == "confirmed"  # fooled by the drop
+    wrong = 0
+    for seed in range(40):
+        fac = FactorialInterrogator(seed=seed)
+        simulate(fac, lambda t: 12.0 if t < 10 else 3.0, {1: 4.0}, ranked, 40)
+        wrong += any(v["app"] == 2 and v["verdict"] == "confirmed" for v in fac.verdicts)
+    assert wrong <= 6  # about the 5% false-positive rate the permutation test promises, not 100%

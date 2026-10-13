@@ -32,7 +32,7 @@ from typing import Any
 import psutil
 
 from . import native
-from .blame import MODES, PROTECTED_NAMES, Blamer, BlameDecision, Interrogator, ProcSample
+from .blame import MODES, PROTECTED_NAMES, Blamer, BlameDecision, ProcSample, make_interrogator
 from .controller import Calibration, Controller, ControllerConfig
 from .engine import (CANARY_ENV, CONTROL_PERIOD_S, CPU_COUNT, DATA_DIR, FG_ENV, Ledger, _env, _reap, _spawn, ensure_data_files, summarize_rows)
 from .probes import LAUNCHER, PROBE, WORKER
@@ -186,7 +186,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         t_ready = time.time()
         culprit_root = apps[0]["proc"].pid
         blamer = Blamer(CONTROL_PERIOD_S, engage_wsi=controller.cfg.engage_wsi, stop_pids=frozenset({os.getpid()}), exclude_pids=frozenset({canary.pid}))
-        if mode in MODES: interrogator = Interrogator(mode, slo_wsi=controller.cfg.slo_wsi, eval_periods=controller.cfg.benefit_eval_periods, min_reduction=controller.cfg.benefit_min_reduction)
+        if mode in MODES: interrogator = make_interrogator(mode, slo_wsi=controller.cfg.slo_wsi, eval_periods=controller.cfg.benefit_eval_periods, min_reduction=controller.cfg.benefit_min_reduction, seed=seed)
         if mode == "oracle":
             members = [culprit_root] + [c.pid for c in psutil.Process(culprit_root).children(recursive=True)]
             hint = "io_priority" if apps[0]["role"] == "io" else "priority"
@@ -203,9 +203,12 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
                 blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid())
                 if interrogator is not None:
                     ranked = blamer.top_cpu() if mode == "top_cpu" else blamer.rank(row["attributed"] if row["attributed"] != "none" else controller.resource)
+                    seen = len(interrogator.verdicts)
                     for d in interrogator.step(controller.engaged, controller.resource, controller.wsi_history, ranked, blamer.names):
                         governor.apply(d, blamer.members.get(d.app, [d.app]) + _descendants(d.app))
                         events.append({"t_s": round(time.time() - t_ready, 3), "app": d.app, "label": label_of.get(d.app, blamer.names.get(d.app, "?")), "kind": d.kind, "correct": d.app == culprit_root, "reason": d.reason})
+                    for v in interrogator.verdicts[seen:]:
+                        events.append({"t_s": round(time.time() - t_ready, 3), "app": v["app"], "label": label_of.get(v["app"], "?"), "kind": "confirm" if v["verdict"] == "confirmed" else "exonerate" if v["verdict"] == "exonerated" else "blame", "correct": v["app"] == culprit_root})
                 row["suspects"] = [s.as_dict() | {"label": label_of.get(s.app)} for s in blamer.rank(row["attributed"])[:3]] if row["attributed"] in ("cpu", "mem", "io") else []
                 overhead_s += time.process_time() - tick
         ctl_thread = threading.Thread(target=loop, daemon=True); ctl_thread.start()
@@ -233,7 +236,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         _reap(canary); _reap(fg); stop_event.close()
 
     rows = fg_out.get("rows", [])
-    nudges = [e for e in events if e["kind"] == "nudge"]
+    nudges = [e for e in events if e["kind"] == ("confirm" if mode in ("interventional", "factorial") else "nudge")]  # what each mode actually blamed
     verdicts = interrogator.verdicts if interrogator else []
     first_correct = next((e["t_s"] for e in nudges if e["correct"]), None)
     culprit_label = apps[0]["label"] if apps else None; culprit_pid = apps[0]["proc"].pid if apps else None
@@ -243,7 +246,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         "apps": [{k: v for k, v in a.items() if k != "proc"} | {"pid": a["proc"].pid} for a in apps], "culprit": culprit_label,
         "events": events, "verdicts": [v | {"correct": v["app"] == culprit_pid} for v in verdicts],
         "first_nudge_correct": nudges[0]["correct"] if nudges else None, "wrong_nudges": sum(1 for e in nudges if not e["correct"]),
-        "time_to_correct_nudge_s": first_correct, "nudges": len(nudges),
+        "time_to_correct_nudge_s": first_correct, "nudges": len(nudges), "probe_nudges": sum(1 for e in events if e["kind"] == "nudge"),
         "actions": ledger.entries, "actions_verified": sum(e["verified"] for e in ledger.entries if not e["kind"].endswith("_revert")),
         "action_count": sum(1 for e in ledger.entries if not e["kind"].endswith("_revert")),
         "reverts_verified": all(e["verified"] for e in ledger.entries if e["kind"].endswith("_revert")) if any(e["kind"].endswith("_revert") for e in ledger.entries) else None,

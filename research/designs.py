@@ -20,7 +20,7 @@ from research.analyze import _p, compare, fmt_ratio, index, load, wsi_validity
 
 NAMES = {"none": "None", "observe": "Observe-only", "nice": "Static priority", "ecoqos": "Efficiency mode (EcoQoS)", "adaptive": "SmartSwap v2",
          "adaptive_eco": "SmartSwap + EcoQoS rung", "oracle": "Oracle (culprit known)", "top_cpu": "Top-CPU app (Task Manager)",
-         "passive": "Passive blame", "interventional": "Interventional blame (SmartSwap)"}
+         "passive": "Passive blame", "interventional": "One-at-a-time intervention", "factorial": "Randomized factorial (SmartSwap)"}
 COMPARISONS = {
     "ecoqos": [("ecoqos", "none"), ("nice", "none"), ("adaptive", "ecoqos"), ("adaptive_eco", "ecoqos"), ("adaptive_eco", "adaptive")],
     "real": [("nice", "none"), ("ecoqos", "none"), ("adaptive", "none"), ("adaptive_eco", "none"), ("adaptive", "ecoqos"), ("adaptive_eco", "ecoqos")],
@@ -103,26 +103,29 @@ def analyse_blame(study: Path, out: Path) -> dict[str, Any]:
     manifest, trials = load(study)
     for t in trials: t.setdefault("preset", t.get("scenario")); t.setdefault("policy", t.get("mode"))
     outcomes = blame_outcomes(trials); idx = index(trials)
-    scenarios = sorted({s for s, _ in outcomes}); modes = ["oracle", "top_cpu", "passive", "interventional"]
+    scenarios = sorted({s for s, _ in outcomes}); modes = [m for m in ["oracle", "top_cpu", "passive", "interventional", "factorial"] if any(mm == m for _, mm in outcomes)]
+    best = "factorial" if "factorial" in modes else "interventional"
     cells = {f"{s}/{m}": precision_at_1(outcomes[(s, m)]) for s in scenarios for m in ["none", *modes] if outcomes[(s, m)]}
     family = []
     for s in scenarios:
-        for ref in ("top_cpu", "passive"):
-            if outcomes[(s, "interventional")] and outcomes[(s, ref)]:
-                family.append({"test": "mcnemar_first_nudge", "scenario": s, "a": "interventional", "b": ref, **mcnemar(outcomes[(s, "interventional")], outcomes[(s, ref)])})
-            c = compare(idx, s, "interventional", ref)
-            if c: family.append({"test": "wilcoxon_p95", "scenario": s, "a": "interventional", "b": ref, **c})
+        for ref in [m for m in ("top_cpu", "passive", "interventional") if m != best]:
+            if outcomes[(s, best)] and outcomes[(s, ref)]:
+                family.append({"test": "mcnemar_first_nudge", "scenario": s, "a": best, "b": ref, **mcnemar(outcomes[(s, best)], outcomes[(s, ref)])})
+            c = compare(idx, s, best, ref)
+            if c: family.append({"test": "wilcoxon_p95", "scenario": s, "a": best, "b": ref, **c})
         for m in modes:
             c = compare(idx, s, m, "none")
             if c: family.append({"test": "wilcoxon_p95", "scenario": s, "a": m, "b": "none", **c})
     for c, padj in zip(family, holm([c["p"] for c in family])): c["p_holm"] = padj
-    verdicts = [v for t in trials if t["mode"] == "interventional" and not t["errors"] for v in t.get("verdicts", [])]
+    verdicts = [v for t in trials if t["mode"] in ("interventional", "factorial") and not t["errors"] for v in t.get("verdicts", [])]
+    bills = [v["bill_ms_per_s"] for v in verdicts if v.get("bill_ms_per_s") is not None and v["verdict"] == "confirmed" and v["correct"]]
     conf = [v for v in verdicts if v["verdict"] == "confirmed"]; exo = [v for v in verdicts if v["verdict"] == "exonerated"]
     pooled = {m: precision_at_1({i: t for i, t in enumerate(t for (s, mm), by in outcomes.items() if mm == m for t in by.values())}) for m in modes}
     overhead = [t["governor_cpu_share"] for t in trials if t.get("governor_cpu_share") is not None]
     actions = [e for t in trials for e in t["actions"] if not e["kind"].endswith("_revert")]; reverts = [e for t in trials for e in t["actions"] if e["kind"].endswith("_revert")]
     summary = {"study_id": manifest["study_id"], "design": "blame", "host": manifest["host"], "trials": len(trials), "trials_with_errors": sum(1 for t in trials if t["errors"]),
                "cells": cells, "pooled": pooled, "tests": family,
+               "culprit_bill_ms_per_s_median": statistics.median(bills) if bills else None,
                "verdicts": {"confirmed": len(conf), "confirmed_correct": sum(v["correct"] for v in conf), "exonerated": len(exo), "exonerated_correct": sum(not v["correct"] for v in exo)},
                "blame_cpu_share_median": statistics.median(overhead) if overhead else None,
                "ledger": {"actions": len(actions), "verified": sum(e["verified"] for e in actions), "reverts": len(reverts), "reverts_verified": sum(e["verified"] for e in reverts)}}
@@ -152,7 +155,7 @@ def _blame_figure(cells: dict[str, Any], scenarios: list[str], modes: list[str],
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    tone = {"oracle": "#8a8984", "top_cpu": "#eb6834", "passive": "#2a78d6", "interventional": "#1baf7a"}
+    tone = {"oracle": "#8a8984", "top_cpu": "#eb6834", "passive": "#2a78d6", "interventional": "#eda100", "factorial": "#1baf7a"}
     fig, ax = plt.subplots(figsize=(7.0, 2.2)); width = 0.8 / len(modes)
     for j, m in enumerate(modes):
         ys = [100 * (cells.get(f"{s}/{m}", {}).get("precision_at_1") or 0) for s in scenarios]

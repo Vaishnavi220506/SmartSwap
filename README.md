@@ -6,7 +6,7 @@ Background work (sync clients, indexers, updates, builds) slows down the app you
 
 1. **Measures** that loss with the **Windows Stall Index (WSI)**: a low-duty canary process wakes every 40 ms and times its own scheduling delay, compute, memory streaming, and unbuffered disk reads. This is a PSI-style signal that needs no admin rights, drivers, or hardware counters.
 2. **Names the cause** (CPU, memory bandwidth, or storage) by testing the most *specific* symptom first.
-3. **Names the culprit application** (new in v3), among every process on the desktop. Passive ranking correlates each application's matched resource use with the stall. Then a short, reversible intervention confirms causality: SmartSwap nudges the top suspect, and the canary checks whether the stall drops. Innocent applications are exonerated and restored.
+3. **Names the culprit application** (new in v3), among every process on the desktop, by experiment rather than correlation. Passive ranking picks up to 3 suspects. Then SmartSwap runs a **randomized factorial micro-experiment** on the live desktop: each suspect's priority is lowered in a random, balanced half of 8 short slots (about 5 s). A permutation test says which suspects causally raise the stall. Because the assignment is random, load that drifts mid-test cannot fool it. The measured effect is a per-application **interference bill** (ms of your time lost per second). Innocent applications are restored.
 4. **Applies the cheapest fix that works**, using a ladder: lower background priority → steer background work to efficiency cores (hybrid CPUs) → EcoQoS, Windows 11's Efficiency mode → an AIMD-tuned Job Object CPU-rate cap.
 5. **Proves every action twice**: Windows reads back that it took effect, and the canary confirms it helped. Otherwise it is rolled back.
 
@@ -40,6 +40,8 @@ The table above is the v2 study (one machine). v3 adds the following. Each item 
 | A real app's UI latency as the foreground: a `WM_NULL` round trip to Notepad's message pump, the same test Windows uses for "Not Responding" | Answers "synthetic foreground only". Validates WSI against an unmodified app. | `--design realapp` |
 | Real tools as the background: byte-compiling the stdlib, `certutil` hashing, `Compress-Archive`, `findstr` | Answers "synthetic background only" | `--design real` |
 | Multi-host pooling with a hierarchical bootstrap and host-level sign tests | Answers "one machine" | `python -m research.pool` |
+| Linux port (`backend/posix.py`): nice, ioprio, cgroup quota, O_DIRECT | Checks the canary against a kernel oracle (PSI), which Windows lacks | `python -m research.linux_study run --design validity\|blame\|mitigation` |
+| Drift simulation for blame confirmation | Shows why randomization matters | `python -m research.simulate_blame` |
 | 5 pre-registered primary hypotheses (`research/hypotheses.json`); Holm runs over these only | Answers "nothing survives Holm" | `python -m research.pool` |
 | Canary and blame CPU overhead; blocks needed for 80% power per comparison | Overhead and sample-size questions | every design |
 

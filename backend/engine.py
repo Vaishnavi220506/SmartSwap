@@ -486,7 +486,7 @@ class LiveMonitor:
             self.ledger = Ledger(time.time()); self.interrogator = self.governor = None
             if govern:
                 gov.recover()
-                self.interrogator = blame.Interrogator("interventional", slo_wsi=self.controller.cfg.slo_wsi)
+                self.interrogator = blame.make_interrogator("factorial", slo_wsi=self.controller.cfg.slo_wsi)
                 self.governor = gov.ExternalGovernor(self.ledger, allow=allow)
             self.stop_flag.clear(); self.started_at = time.time()
             threading.Thread(target=self._read, daemon=True).start()

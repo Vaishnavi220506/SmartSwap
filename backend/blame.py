@@ -34,14 +34,31 @@ Stage 2, interventional confirmation (one suspect at a time)
     `cooldown_periods`. While the stall persists, the next suspect is tested.
     Every nudge is lowering-only and is reverted when the stall clears.
 
+Stage 2', factorial randomized micro-experiments (mode "factorial")
+    The one-at-a-time test is fooled when the load itself changes during the
+    test window (a phased culprit going quiet makes an innocent suspect look
+    guilty). The factorial mode runs a small randomized controlled trial on
+    the live desktop instead: the top k suspects are each nudged in a random,
+    balanced half of `slots` short slots, independently of one another (a 2^k
+    factorial design). Because assignment is random, it is independent of
+    whatever the load is doing, so the difference in mean WSI between a
+    suspect's nudged and un-nudged slots is an unbiased estimate of its causal
+    effect; a permutation test over the assignment gives its p-value. All k
+    suspects are tested in the same few seconds. Suspects with a significant
+    effect are kept nudged; the rest are released. The effect, in WSI points,
+    is also an "interference bill": 1 point = 10 ms of foreground time lost
+    per second.
+
 Modes (for evaluation; the actuator is identical in all of them)
     top_cpu         Task-Manager heuristic: nudge the top CPU application.
     passive         nudge the top passive suspect, no confirmation.
-    interventional  passive ranking + causal confirmation (SmartSwap).
+    interventional  passive ranking + one-at-a-time causal confirmation.
+    factorial       passive ranking + randomized factorial confirmation (SmartSwap).
 """
 from __future__ import annotations
 
 import math
+import random
 import statistics
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,7 +78,7 @@ PROTECTED_NAMES = frozenset({
     "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "lsaiso.exe", "dwm.exe", "fontdrvhost.exe",
     "audiodg.exe", "explorer.exe", "sihost.exe", "ctfmon.exe", "msmpeng.exe", "securityhealthservice.exe",
 })
-MODES = ("top_cpu", "passive", "interventional")
+MODES = ("top_cpu", "passive", "interventional", "factorial")
 
 
 @dataclass(frozen=True)
@@ -246,3 +263,91 @@ class Interrogator:
                 out.append(BlameDecision("nudge", s.app, hint, f"{self.mode}: blamed {s.name} (score {s.score:.2f})"))
             break
         return out
+
+
+def permutation_effect(y: list[float], x: list[int], permutations: int = 2000, seed: int = 5) -> tuple[float, float]:
+    """Mean(y | x=1) - mean(y | x=0) and its one-sided permutation p-value for a *reduction*."""
+    on = [a for a, b in zip(y, x) if b]; off = [a for a, b in zip(y, x) if not b]
+    if not on or not off: return 0.0, 1.0
+    effect = statistics.fmean(on) - statistics.fmean(off)
+    rng = random.Random(seed); shuffled = list(x); hits = 0
+    for _ in range(permutations):
+        rng.shuffle(shuffled)
+        a = [v for v, b in zip(y, shuffled) if b]; c = [v for v, b in zip(y, shuffled) if not b]
+        if statistics.fmean(a) - statistics.fmean(c) <= effect + 1e-12: hits += 1
+    return effect, (hits + 1) / (permutations + 1)
+
+
+@dataclass
+class FactorialInterrogator:
+    """Randomized factorial micro-experiments over the top-k suspects (see module docstring)."""
+
+    mode: str = "factorial"
+    slo_wsi: float = 3.0
+    k: int = 3
+    slots: int = 8                  # balanced: each suspect is nudged in exactly slots/2 of them
+    slot_periods: int = 3           # the first period of a slot lets the canary window refill
+    alpha: float = 0.05
+    min_effect: float = 1.0         # WSI points; smaller effects are not worth a nudge
+    cooldown_periods: int = 50
+    min_score: float = 0.02
+    seed: int = 0
+    period: int = 0
+    nudged: dict[int, str] = field(default_factory=dict)
+    confirmed: set[int] = field(default_factory=set)
+    exonerated: dict[int, int] = field(default_factory=dict)
+    verdicts: list[dict[str, Any]] = field(default_factory=list)
+    experiment: dict[str, Any] | None = None
+
+    def _set(self, app: int, hint: str, on: bool, reason: str) -> list[BlameDecision]:
+        if on and app not in self.nudged: self.nudged[app] = hint; return [BlameDecision("nudge", app, hint, reason)]
+        if not on and app in self.nudged and app not in self.confirmed: return [BlameDecision("release", app, self.nudged.pop(app), reason)]
+        return []
+
+    def step(self, engaged: bool, resource: str, wsi_history: list[float], ranked: list[Suspect], names: dict[int, str] | None = None) -> list[BlameDecision]:
+        self.period += 1; out: list[BlameDecision] = []; names = names or {}
+        if not engaged:
+            if self.nudged:
+                out += [BlameDecision("release", app, hint, "stall cleared") for app, hint in sorted(self.nudged.items())]
+                self.nudged.clear(); self.confirmed.clear(); self.experiment = None
+            return out
+        e = self.experiment
+        if e is not None:
+            e["tick"] += 1; slot, pos = divmod(e["tick"], self.slot_periods)
+            if pos != 0 and wsi_history: e["y"][slot].append(wsi_history[-1])  # skip the settling period
+            if pos == 0 and slot < self.slots:  # next slot: switch every suspect to its assignment
+                for app, plan in e["plan"].items(): out += self._set(app, e["hint"], bool(plan[slot]), f"micro-experiment slot {slot + 1}/{self.slots}")
+            if slot >= self.slots:
+                self.experiment = None
+                y = [statistics.fmean(v) if v else 0.0 for v in e["y"]]
+                for app, plan in e["plan"].items():
+                    effect, p = permutation_effect(y, plan, seed=self.seed + self.period)
+                    guilty = p < self.alpha and -effect >= self.min_effect
+                    self.verdicts.append({"period": self.period, "app": app, "name": names.get(app, "?"), "verdict": "confirmed" if guilty else "exonerated",
+                                          "effect_wsi": round(effect, 3), "p": round(p, 4), "bill_ms_per_s": round(max(0.0, -effect) * 10, 1),
+                                          "wsi_before": round(e["baseline"], 3), "wsi_after": round(statistics.fmean(y), 3)})
+                    if guilty:
+                        if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"confirmed: nudging cut WSI by {-effect:.1f} points (p={p:.3f})")); self.nudged[app] = e["hint"]
+                        self.confirmed.add(app)
+                    else:
+                        self.exonerated[app] = self.period + self.cooldown_periods
+                        if app in self.nudged: out.append(BlameDecision("release", app, self.nudged.pop(app), f"exonerated: effect {effect:+.1f} WSI points (p={p:.2f})"))
+            return out
+        recent = statistics.fmean(wsi_history[-5:]) if wsi_history else 0.0
+        if recent <= self.slo_wsi or resource not in HINTS: return out
+        pool = [s for s in ranked if not s.protected and s.app not in self.confirmed and self.exonerated.get(s.app, -1) <= self.period and s.usage > 0 and s.score >= self.min_score][: self.k]
+        if not pool: return out
+        rng = random.Random(self.seed * 7919 + self.period); plan = {}
+        for s in pool:
+            assignment = [1] * (self.slots // 2) + [0] * (self.slots - self.slots // 2); rng.shuffle(assignment); plan[s.app] = assignment
+        hint = HINTS[resource]
+        self.experiment = {"plan": plan, "hint": hint, "tick": 0, "y": [[] for _ in range(self.slots)], "baseline": recent}
+        for app, a in plan.items(): out += self._set(app, hint, bool(a[0]), f"micro-experiment over {len(plan)} suspects ({', '.join(names.get(x, '?') for x in plan)}), slot 1/{self.slots}")
+        return out
+
+
+def make_interrogator(mode: str, **kw: Any) -> Interrogator | FactorialInterrogator:
+    """The confirmation stage for a blame mode, configured from the controller's thresholds."""
+    if mode == "factorial":
+        return FactorialInterrogator(slo_wsi=kw.get("slo_wsi", 3.0), seed=kw.get("seed", 0))
+    return Interrogator(mode, slo_wsi=kw.get("slo_wsi", 3.0), eval_periods=kw.get("eval_periods", 8), min_reduction=kw.get("min_reduction", 0.3))

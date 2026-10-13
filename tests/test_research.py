@@ -63,7 +63,7 @@ def test_design_analysis_and_multi_host_pooling(tmp_path: Path) -> None:
             eco += [_trial("membw", "none", b, base), _trial("membw", "ecoqos", b, base * 0.8), _trial("membw", "adaptive_eco", b, base * 0.5),
                     _trial("membw", "nice", b, base * 0.9), _trial("membw", "adaptive", b, base * 0.6)]
             for s in ("cpu", "io_vs_cpu"):
-                for mode, ok in (("none", None), ("top_cpu", s == "cpu"), ("passive", True), ("interventional", True), ("oracle", True)):
+                for mode, ok in (("none", None), ("top_cpu", s == "cpu"), ("passive", True), ("interventional", True), ("factorial", True), ("oracle", True)):
                     t = _trial(s, mode, b, base * (0.4 if ok else 1.0), scenario=s, mode=mode, first_nudge_correct=ok, wrong_nudges=0 if ok in (None, True) else 1,
                                time_to_correct_nudge_s=1.0 if ok else None, verdicts=[], governor_cpu_share=0.02)
                     blame.append(t)
