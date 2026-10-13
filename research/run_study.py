@@ -32,7 +32,7 @@ from pathlib import Path
 import psutil
 
 from backend.controller import ControllerConfig
-from backend.engine import ALL_PRESETS, CANARY_ENV, CONTROL_PERIOD_S, FG_ENV, POLICIES, REAL_PRESETS, STATIC_CAP_PERCENT, calibrate_canary, run_trial
+from backend.engine import ALL_PRESETS, CANARY_ENV, CONTROL_PERIOD_S, FG_ENV, POLICIES, REAL_PRESETS, STATIC_CAP_PERCENT, calibrate_canary, learn_fingerprints, run_trial
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "SmartSwap" / "results"
@@ -55,10 +55,12 @@ REAL_POLICIES = ["none", "observe", "nice", "ecoqos", "adaptive", "adaptive_eco"
 REALAPP_PRESETS = ["idle", "cpu", "membw", "io", "mixed"]
 REALAPP_POLICIES = ["none", "observe", "nice", "adaptive"]
 BLAME_MODES = ["none", "oracle", "top_cpu", "passive", "interventional"]
-DESIGNS = ["main", "slo-sweep", "hybrid", "ecoqos", "real", "realapp", "blame"]
+DESIGNS = ["main", "slo-sweep", "hybrid", "ecoqos", "real", "realapp", "blame", "attribution"]
 
 
 def cells(design: str = "main") -> list[tuple[str, str]]:
+    if design == "attribution":  # observe-only; the ordered rule and the fingerprints are scored on the same periods
+        return [(preset, "observe") for preset in ("idle", "cpu", "membw", "io", "mixed")]
     if design == "ecoqos":  # the OS's own answer to background work, as a baseline and as a ladder rung
         return [(preset, policy) for preset in ECOQOS_PRESETS for policy in ECOQOS_POLICIES]
     if design == "real":  # real tools instead of synthetic workers; "idle" is the no-interference control
@@ -109,6 +111,7 @@ def main() -> None:
     ap.add_argument("--settle", type=float, default=0.5, help="extra idle seconds between trials (plus a 1 s load sample)")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--design", choices=DESIGNS, default="main")
+    ap.add_argument("--fingerprint", action="store_true", help="learn this PC's contention fingerprints each block and attribute with them (always on for --design attribution)")
     ap.add_argument("--foreground", default=None, help='"probe" or "ui:<exe>" (default: ui:notepad.exe for realapp, probe otherwise)')
     args = ap.parse_args()
     foreground = args.foreground or ("ui:notepad.exe" if args.design == "realapp" else "probe")
@@ -131,6 +134,8 @@ def main() -> None:
         if all((block, p, q) in finished for p, q in order): continue
         time.sleep(3)
         cal = calibrate_canary()
+        fps = learn_fingerprints(cal) if args.fingerprint or args.design == "attribution" else None
+        if fps: print(f"block {block} fingerprints: {fps}", flush=True)
         for position, (preset, policy) in enumerate(order):
             if (block, preset, policy) in finished: continue
             host_load = psutil.cpu_percent(interval=1.0)  # covariate: non-study load just before the trial
@@ -139,7 +144,7 @@ def main() -> None:
                 result = run_blame_trial(preset, policy, cal, seed=block * 100 + position)
                 result.update(preset=preset, policy=policy, background_units_per_s={})
             else:
-                result = run_trial(preset, policy, cal, seed=block * 100 + position, foreground=foreground)
+                result = run_trial(preset, policy, cal, seed=block * 100 + position, foreground=foreground, fingerprints=fps)
             result.update(block=block, position=position, study_id=study_id, host_cpu_pct_before=host_load)
             with trials_path.open("a", encoding="utf-8") as handle: handle.write(json.dumps(result) + "\n")
             count += 1

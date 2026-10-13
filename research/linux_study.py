@@ -43,7 +43,7 @@ import psutil
 
 from backend import posix
 from backend.blame import MODES, Blamer, make_interrogator
-from backend.controller import Calibration, Controller, ControllerConfig
+from backend.controller import Calibration, Controller, ControllerConfig, learn_fingerprint
 from backend.engine import CANARY_ENV, CONTROL_PERIOD_S, FG_ENV, Ledger, summarize_rows
 from backend.govern import scenarios
 from backend.stats import rank, spearman
@@ -91,6 +91,28 @@ def calibrate(seconds: float = 4.0) -> Calibration:
     p = spawn(posix.PROBE, {**CANARY_ENV, "SS_STREAM": "0", "SS_DURATION": str(seconds), "SS_IO_FILE": str(probe)})
     out, _ = p.communicate(timeout=seconds + 30)
     return Calibration.from_rows(json.loads(out.strip().splitlines()[-1])["rows"])
+
+
+def learn_fingerprints(cal: Calibration, seconds: float = 3.0) -> dict[str, list[float] | None]:
+    """Generate each kind of contention briefly and record the canary's response (see controller.py)."""
+    bg, probe = data_files(); out: dict[str, list[float] | None] = {}
+    for resource, preset in (("cpu", "cpu"), ("mem", "membw"), ("io", "io")):
+        stop_file = DATA / f"fp-stop-{os.getpid()}-{resource}"; stop_file.unlink(missing_ok=True); workers = []
+        try:
+            for role, count in PRESETS[preset]:
+                for j in range(count): workers.append(spawn(posix.WORKER, {"SS_ROLE": role, "SS_STOP_FILE": str(stop_file), "SS_IO_FILE": str(bg), "SS_BG_IO_BLOCK": str(1 << 20), "SS_BG_MEM_BYTES": str(64 << 20), "SS_SEED": str(j)}))
+            for w in workers: w.stdout.readline()
+            c = spawn(posix.PROBE, {**CANARY_ENV, "SS_STREAM": "0", "SS_DURATION": str(seconds), "SS_IO_FILE": str(probe)})
+            rows = json.loads(c.communicate(timeout=seconds + 30)[0].strip().splitlines()[-1])["rows"]
+            out[resource] = learn_fingerprint([rows[i:i + 8] for i in range(0, len(rows) - 7, 4)], cal)
+        finally:
+            stop_file.touch()
+            for w in workers:
+                try: w.communicate(timeout=20)
+                except Exception: pass
+                reap(w)
+            stop_file.unlink(missing_ok=True)
+    return out
 
 
 class Actuator:
@@ -143,11 +165,11 @@ class Actuator:
         if self.cap: self.cap.close()
 
 
-def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int) -> dict[str, Any]:
+def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int, fingerprints: dict[str, Any] | None = None) -> dict[str, Any]:
     bg, probe = data_files(); t0 = time.time(); ledger = Ledger(t0); errors: list[str] = []
     stop_file = DATA / f"stop-{os.getpid()}-{int(t0 * 1e6)}"; stop = threading.Event()
     canary = fg = None; rows: list[dict[str, float]] = []; workers: list[tuple[str, subprocess.Popen]] = []; apps: list[dict[str, Any]] = []
-    cfg = ControllerConfig(act=(policy == "adaptive")); controller = Controller(cal, float(CANARY_ENV["SS_INTERVAL"]) * 1000, cfg)
+    cfg = ControllerConfig(act=(policy == "adaptive"), fingerprints=fingerprints); controller = Controller(cal, float(CANARY_ENV["SS_INTERVAL"]) * 1000, cfg)
     actuator: Actuator | None = None; interrogator = None; blamer = None; events: list[dict[str, Any]] = []; ctl = None; fg_out: dict[str, Any] = {}; overhead = 0.0
     blame = design == "blame"; use_canary = blame or policy in ("observe", "adaptive") or design == "validity"
     try:
@@ -246,7 +268,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
               "actions_verified": sum(e["verified"] for e in acts), "reverts_verified": all(e["verified"] for e in reverts) if reverts else None,
               "controller_trace": controller.trace if use_canary else [], "canary_beats": len(rows), "calibration": asdict(cal),
               "controller_engaged_share": round(sum(1 for s in controller.trace if s["engaged"]) / len(controller.trace), 3) if controller.trace else None,
-              "time_to_first_action_s": None, "control_cpu_share": round(overhead / max(1e-3, time.time() - t0), 5)}
+              "fingerprints": fingerprints, "time_to_first_action_s": None, "control_cpu_share": round(overhead / max(1e-3, time.time() - t0), 5)}
     if blame:
         result.update(scenario=preset, mode=policy, culprit=apps[0]["label"] if apps else None, events=events,
                       apps=[{k: v for k, v in a.items() if k != "proc"} | {"pid": a["proc"].pid} for a in apps],
@@ -293,11 +315,12 @@ def run(args: argparse.Namespace) -> Path:
     for block in range(args.blocks):
         order = cells(args.design); rng.shuffle(order)
         if all((block, p, q) in done for p, q in order): continue
-        time.sleep(2); cal = calibrate()
+        time.sleep(2); cal = calibrate(); fps = learn_fingerprints(cal) if args.fingerprint else None
+        if fps: print(f"block {block} fingerprints: {fps}", flush=True)
         for pos, (p, q) in enumerate(order):
             if (block, p, q) in done: continue
             load = psutil.cpu_percent(interval=1.0)
-            r = run_trial(args.design, p, q, cal, block * 100 + pos); r.update(block=block, position=pos, study_id=study_id, host_cpu_pct_before=load)
+            r = run_trial(args.design, p, q, cal, block * 100 + pos, fps); r.update(block=block, position=pos, study_id=study_id, host_cpu_pct_before=load)
             with trials.open("a") as f: f.write(json.dumps(r) + "\n")
             count += 1
             print(f"[{count}/{total}] b{block} {p:12} {q:14} p95={r['foreground'].get('p95_ms')} acts={r['action_count']} err={r['errors'][:1]}", flush=True)
@@ -355,13 +378,19 @@ def write_validity(s: dict[str, Any], out: Path) -> None:
     for p, d in s["detection"].items():
         a = s["attribution"].get(p, {}); acc = f"{a['correct']}/{a['periods']}" if a.get("periods") else "-"
         L.append(f"| {p} | {f(d['canary_auc'], 3)} | {f(d['psi_auc'], 3)} | {f(d['canary_wsi_median'], 1)} | {f(d['psi_some_median']['cpu'], 1)} / {f(d['psi_some_median']['io'], 1)} / {f(d['psi_some_median']['mem'], 1)} | {f(s['fg_p95_median_none'].get(p))} | {acc} |")
+    sc = s.get("attribution_rule_vs_fingerprint") or {}
+    if any(k in sc for k in ("cpu", "membw", "io")):
+        L += ["", "## Attribution on the same stalled periods: ordered rule vs. learned fingerprints", "", "| Workload | stalled periods | ordered rule | fingerprints |", "|---|---:|---:|---:|"]
+        L += [f"| {k} | {v['periods']} | {100 * v['rule_accuracy']:.1f}% | {100 * v['fingerprint_accuracy']:.1f}% |" for k, v in sc.items() if k in ("cpu", "membw", "io")]
+        if "mixed_mean_shares" in sc: L.append(f"\nMixed workload, mean fingerprint shares: {sc['mixed_mean_shares']}")
     (out / "RESULTS.md").write_text("\n".join(L) + "\n", encoding="utf-8")
 
 
 def analyse(study: Path, out: Path) -> Path:
     design = json.loads((study / "manifest.json").read_text())["design_name"]; out.mkdir(parents=True, exist_ok=True)
     if design == "validity":
-        s = analyse_validity(study); (out / "summary.json").write_text(json.dumps(s, indent=2, default=float)); write_validity(s, out)
+        from research.designs import score_attribution
+        s = analyse_validity(study); s["attribution_rule_vs_fingerprint"] = score_attribution(study); (out / "summary.json").write_text(json.dumps(s, indent=2, default=float)); write_validity(s, out)
     elif design == "blame":
         from research.designs import analyse_blame
         analyse_blame(study, out)
@@ -376,6 +405,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter); sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run"); r.add_argument("--design", choices=["validity", "mitigation", "blame"], required=True); r.add_argument("--blocks", type=int, default=8)
     r.add_argument("--seed", type=int, default=20261013); r.add_argument("--study-id"); r.add_argument("--out", type=Path, default=DATA / "results")
+    r.add_argument("--fingerprint", action="store_true", help="learn contention fingerprints per block and attribute with them")
     a = sub.add_parser("analyze"); a.add_argument("study", type=Path); a.add_argument("--out", type=Path)
     args = ap.parse_args()
     if args.cmd == "run": study = run(args); print(analyse(study, study / "analysis"))

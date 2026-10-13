@@ -40,12 +40,14 @@ The table above is the v2 study (one machine). v3 adds the following. Each item 
 | A real app's UI latency as the foreground: a `WM_NULL` round trip to Notepad's message pump, the same test Windows uses for "Not Responding" | Answers "synthetic foreground only". Validates WSI against an unmodified app. | `--design realapp` |
 | Real tools as the background: byte-compiling the stdlib, `certutil` hashing, `Compress-Archive`, `findstr` | Answers "synthetic background only" | `--design real` |
 | Multi-host pooling with a hierarchical bootstrap and host-level sign tests | Answers "one machine" | `python -m research.pool` |
-| Linux port (`backend/posix.py`): nice, ioprio, cgroup quota, O_DIRECT | Checks the canary against a kernel oracle (PSI), which Windows lacks | `python -m research.linux_study run --design validity\|blame\|mitigation` |
+| Contention fingerprinting: each PC learns how CPU, bandwidth and storage contention distort its canary; live stalls are decomposed into resource shares | Hand-ordered attribution rules do not carry across machines; mixed load needs shares, not one label | `--design attribution` (and `--fingerprint` on any design) |
 | Drift simulation for blame confirmation | Shows why randomization matters | `python -m research.simulate_blame` |
 | 5 pre-registered primary hypotheses (`research/hypotheses.json`); Holm runs over these only | Answers "nothing survives Holm" | `python -m research.pool` |
 | Canary and blame CPU overhead; blocks needed for 80% power per comparison | Overhead and sample-size questions | every design |
 
 `docs/PAPER_PLAN.md` gives the contribution list, the protocol, and which result supports which claim.
+
+SmartSwap targets Windows only. `backend/posix.py` and `research/linux_study.py` are a development harness for exercising the shared controller and blame code on Linux machines; they are not part of the evaluation.
 
 ## System design
 
@@ -87,6 +89,7 @@ python -m research.run_study --design blame --blocks 10           # culprit iden
 python -m research.run_study --design ecoqos --blocks 10          # vs. Windows 11 Efficiency mode
 python -m research.run_study --design realapp --blocks 8          # foreground = Notepad's UI latency
 python -m research.run_study --design real --blocks 8             # real tools as background
+python -m research.run_study --design attribution --blocks 8      # ordered rule vs. learned fingerprints
 python -m research.analyze "$env:LOCALAPPDATA\SmartSwap\results\<study-id>"
 ```
 

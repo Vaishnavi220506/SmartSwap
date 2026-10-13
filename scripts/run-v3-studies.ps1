@@ -10,11 +10,11 @@
 # opens and closes Notepad itself (realapp design); do not type into it.
 param(
   [switch]$Quick,
-  [string[]]$Designs = @('blame', 'ecoqos', 'realapp', 'real', 'hybrid', 'main')
+  [string[]]$Designs = @('blame', 'attribution', 'ecoqos', 'realapp', 'real', 'hybrid', 'main')
 )
 $ErrorActionPreference = 'Stop'
 Set-Location "$PSScriptRoot\.."
-$blocks = @{ main = 10; hybrid = 8; ecoqos = 10; real = 8; realapp = 8; blame = 10 }
+$blocks = @{ main = 10; hybrid = 8; ecoqos = 10; real = 8; realapp = 8; blame = 10; attribution = 8 }
 $out = Join-Path $env:LOCALAPPDATA 'SmartSwap\results'
 $tag = "$($env:COMPUTERNAME.ToLower())-$(Get-Date -Format yyyyMMdd)"
 $done = @()

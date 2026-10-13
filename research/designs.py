@@ -15,6 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from backend.controller import Calibration, attribute, attribute_fingerprint
 from backend.stats import holm, sign_test
 from research.analyze import _p, compare, fmt_ratio, index, load, wsi_validity
 
@@ -30,7 +31,44 @@ COMPARISONS = {
 
 def analyse_design(design: str, study: Path, out: Path) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
+    if design == "attribution": return analyse_attribution(study, out)
     return analyse_blame(study, out) if design == "blame" else analyse_policies(design, study, out)
+
+
+def score_attribution(study: Path, engage: float = 5.0, floor: float = 1.0) -> dict[str, Any]:
+    """Ordered rule vs. fingerprints on the *same* stalled periods (needs traces with median_ms)."""
+    truth = {"cpu": "cpu", "membw": "mem", "io": "io"}; out: dict[str, Any] = {}; mixed_shares = []
+    trials = [json.loads(l) for l in (study / "trials.jsonl").read_text().splitlines() if l.strip()]
+    for t in trials:
+        if t["policy"] != "observe" or t["errors"] or not t.get("fingerprints"): continue
+        cal = Calibration(**t["calibration"])
+        for r in t["controller_trace"]:
+            if r["wsi"] < engage or not r.get("median_ms"): continue
+            med = r["median_ms"]
+            ex = {"cpu": max(0.0, (med["sched"] - cal.sched) / max(cal.total, 0.05)), "mem": max(0.0, (med["mem"] - cal.mem) / max(cal.mem, 0.05)), "io": max(0.0, (med["io"] - cal.io) / max(cal.io, 0.05))}
+            rule = attribute(ex, floor)[0]; fp, _, shares = attribute_fingerprint(med, cal, t["fingerprints"], floor)
+            if t["preset"] == "mixed": mixed_shares.append(shares)
+            if t["preset"] in truth:
+                c = out.setdefault(t["preset"], {"periods": 0, "rule_correct": 0, "fingerprint_correct": 0})
+                c["periods"] += 1; c["rule_correct"] += rule == truth[t["preset"]]; c["fingerprint_correct"] += fp == truth[t["preset"]]
+    for k in ("cpu", "membw", "io"):
+        if k in out: out[k]["rule_accuracy"] = out[k]["rule_correct"] / out[k]["periods"]; out[k]["fingerprint_accuracy"] = out[k]["fingerprint_correct"] / out[k]["periods"]
+    if mixed_shares: out["mixed_mean_shares"] = {k: round(statistics.fmean(s.get(k, 0.0) for s in mixed_shares), 3) for k in ("cpu", "mem", "io")}
+    return out
+
+
+def analyse_attribution(study: Path, out: Path) -> dict[str, Any]:
+    """Ordered rule vs. this PC's learned fingerprints, scored on identical stalled periods."""
+    manifest = json.loads((study / "manifest.json").read_text(encoding="utf-8"))
+    sc = score_attribution(study, engage=manifest["controller"]["engage_wsi"], floor=manifest["controller"]["attribution_floor"])
+    summary = {"study_id": manifest["study_id"], "design": "attribution", "host": manifest["host"], "scores": sc}
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float), encoding="utf-8")
+    L = [f"# Attribution: ordered rule vs. learned fingerprints ({manifest['study_id']})", "", f"Host: {manifest['host'].get('cpu')}.", "",
+         "| Workload | stalled periods | ordered rule | fingerprints |", "|---|---:|---:|---:|"]
+    L += [f"| {k} | {v['periods']} | {100 * v['rule_accuracy']:.1f}% | {100 * v['fingerprint_accuracy']:.1f}% |" for k, v in sc.items() if k in ("cpu", "membw", "io")]
+    if "mixed_mean_shares" in sc: L += ["", f"Mixed workload (CPU + bandwidth + storage), mean fingerprint shares: {sc['mixed_mean_shares']}"]
+    (out / "RESULTS.md").write_text("\n".join(L) + "\n", encoding="utf-8")
+    return summary
 
 
 def analyse_policies(design: str, study: Path, out: Path) -> dict[str, Any]:

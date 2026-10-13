@@ -120,3 +120,35 @@ def test_ineffective_steering_is_undone_by_benefit_check() -> None:
 def test_storage_interference_never_steers() -> None:
     ctl = Controller(CAL, PERIOD, ControllerConfig(enable_steer=True))
     assert "hint:steer" not in run(ctl, beats(8, io=8.0), 12)
+
+
+def test_nnls_recovers_a_nonnegative_mix() -> None:
+    from backend.controller import nnls
+    cols = {"cpu": [0.0, 0.2, 0.0, 0.98], "mem": [0.0, 0.0, 1.0, 0.0], "io": [0.0, 0.0, 0.1, 0.995]}
+    v = [2 * a + 3 * b for a, b in zip(cols["mem"], cols["io"])]
+    w = nnls(cols, v)
+    assert abs(w["mem"] - 2) < 1e-6 and abs(w["io"] - 3) < 1e-6 and w["cpu"] == 0.0
+
+
+def test_fingerprints_fix_attribution_where_the_ordered_rule_misfires() -> None:
+    # A scheduler that hides CPU contention from the wake-up delay and shows it in
+    # the read step (what CFS did on the Linux check): the rule says "io".
+    from backend.controller import attribute_fingerprint, learn_fingerprint
+    cpu_rows = [{"sched": 0.32, "cpu": 0.9, "mem": 0.6, "io": 2.0}] * 8
+    io_rows = [{"sched": 0.3, "cpu": 0.25, "mem": 0.5, "io": 3.0}] * 8
+    fps = {"cpu": learn_fingerprint([cpu_rows], CAL), "io": learn_fingerprint([io_rows], CAL), "mem": learn_fingerprint([beats(8)], CAL)}
+    assert fps["mem"] is None  # no measurable effect on this machine: dropped, never attributed
+    m = window_metrics(cpu_rows, CAL, PERIOD)
+    assert attribute(m["excess"], 1.0)[0] == "io"
+    resource, _, shares = attribute_fingerprint(m["median_ms"], CAL, fps, 1.0)
+    assert resource == "cpu" and shares["cpu"] > 0.9
+    mixed = {k: (a + b) / 2 for (k, a), b in zip(cpu_rows[0].items(), io_rows[0].values())}
+    _, _, shares = attribute_fingerprint(mixed, CAL, fps, 1.0)
+    assert 0.2 < shares["cpu"] < 0.8 and 0.2 < shares["io"] < 0.8
+
+
+def test_controller_uses_fingerprints_when_learned() -> None:
+    fps = {"cpu": [0.0, 0.6, 0.0, 0.8], "mem": None, "io": [0.0, 0.0, 0.0, 1.0]}
+    ctl = Controller(CAL, PERIOD, ControllerConfig(fingerprints=fps))
+    kinds = run(ctl, [{"sched": 0.3, "cpu": 1.5, "mem": 0.45, "io": 2.0}] * 8, 2)
+    assert kinds == ["hint:priority"] and ctl.trace[-1]["shares"]["cpu"] > 0.9

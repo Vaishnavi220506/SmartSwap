@@ -30,7 +30,7 @@ from typing import Any
 import psutil
 
 from . import native
-from .controller import Calibration, Controller, ControllerConfig
+from .controller import Calibration, Controller, ControllerConfig, learn_fingerprint
 from .probes import LOOPER, PROBE, UIPROBE, WORKER, ensure_data_files
 
 CPU_COUNT = os.cpu_count() or 4
@@ -99,8 +99,8 @@ _LIVE: set[subprocess.Popen] = set()
 _LIVE_LOCK = threading.Lock()
 
 
-def controller_config(policy: str) -> ControllerConfig:
-    cfg = ControllerConfig()
+def controller_config(policy: str, fingerprints: dict[str, Any] | None = None) -> ControllerConfig:
+    cfg = ControllerConfig(fingerprints=fingerprints)
     if policy == "observe": cfg.act = False
     if policy == "adaptive_noaimd": cfg.enable_aimd = False
     if policy == "adaptive_noladder": cfg.enable_ladder = False
@@ -165,6 +165,35 @@ def calibrate_canary(seconds: float = 4.0) -> Calibration:
     try: out, _ = proc.communicate(timeout=seconds + 20)
     finally: _reap(proc)
     return Calibration.from_rows(json.loads(out.strip().splitlines()[-1])["rows"])
+
+
+def learn_fingerprints(calibration: Calibration, seconds: float = 3.0) -> dict[str, list[float] | None]:
+    """Contention fingerprints of this PC: briefly run each synthetic contention and record the canary.
+
+    Each resource's fingerprint is the canary's unit inflation vector over its
+    components while that contention runs (controller.learn_fingerprint);
+    None if the contention barely moves the canary on this machine.
+    """
+    bg_file, probe_file = ensure_data_files(DATA_DIR); out: dict[str, list[float] | None] = {}
+    for resource, preset in (("cpu", "cpu"), ("mem", "membw"), ("io", "io")):
+        stop_event = native.StopEvent(rf"Local\SmartSwapFingerprint-{os.getpid()}-{resource}-{int(time.time() * 1e6)}"); workers = []
+        try:
+            for role, count in PRESETS[preset]:
+                for i in range(count):
+                    workers.append(_spawn(WORKER, _env({"SS_ROLE": role, "SS_STOP_EVENT": stop_event.name, "SS_IO_FILE": str(bg_file), "SS_BG_IO_BLOCK": str(1 << 20), "SS_BG_MEM_BYTES": str(64 << 20), "SS_SEED": str(i)})))
+            for w in workers: w.stdout.readline()
+            canary = _spawn(PROBE, _env({**CANARY_ENV, "SS_STREAM": "0", "SS_DURATION": str(seconds), "SS_IO_FILE": str(probe_file)}))
+            try: rows = json.loads(canary.communicate(timeout=seconds + 30)[0].strip().splitlines()[-1])["rows"]
+            finally: _reap(canary)
+            out[resource] = learn_fingerprint([rows[i:i + 8] for i in range(0, len(rows) - 7, 4)], calibration)
+        finally:
+            stop_event.set()
+            for w in workers:
+                try: w.communicate(timeout=15)
+                except Exception: pass
+                _reap(w)
+            stop_event.close()
+    return out
 
 
 @dataclass
@@ -324,7 +353,7 @@ def _close_launched(procs: list[psutil.Process], exe: str, launched_after: float
         except psutil.Error: pass
 
 
-def run_trial(preset: str, policy: str, calibration: Calibration | None = None, cancel: threading.Event | None = None, seed: int = 0, foreground: str = "probe") -> dict[str, Any]:
+def run_trial(preset: str, policy: str, calibration: Calibration | None = None, cancel: threading.Event | None = None, seed: int = 0, foreground: str = "probe", fingerprints: dict[str, Any] | None = None) -> dict[str, Any]:
     """One trial. `foreground` is "probe" (synthetic beats) or "ui:<exe>" (a real app's UI latency)."""
     if preset not in ALL_PRESETS: raise ValueError(f"unknown preset {preset}")
     if policy not in POLICIES: raise ValueError(f"unknown policy {policy}")
@@ -346,7 +375,7 @@ def run_trial(preset: str, policy: str, calibration: Calibration | None = None, 
                 for line in canary.stdout:
                     if line.startswith("{"): canary_rows.append(json.loads(line))
             reader = threading.Thread(target=read_canary, daemon=True); reader.start()
-            controller = Controller(calibration, float(CANARY_ENV["SS_INTERVAL"]) * 1000, controller_config(policy))
+            controller = Controller(calibration, float(CANARY_ENV["SS_INTERVAL"]) * 1000, controller_config(policy, fingerprints))
 
         for role, count in ALL_PRESETS[preset]:
             for i in range(count):
@@ -445,7 +474,7 @@ def run_trial(preset: str, policy: str, calibration: Calibration | None = None, 
         "final_cap": controller.cap if controller else (STATIC_CAP_PERCENT if policy == "static" and workers else None),
         "canary_beats": len(canary_rows), "calibration": asdict(calibration) if calibration else None,
         "percpu_busy": percpu, "core_classes": {str(k): v for k, v in native.core_classes().items()},
-        "foreground_mode": foreground, "ui_timeouts": sum(1 for r in rows if r.get("timeout")),
+        "fingerprints": fingerprints, "foreground_mode": foreground, "ui_timeouts": sum(1 for r in rows if r.get("timeout")),
         "canary_cpu_share": round(canary_cpu[0] / canary_cpu[1], 5) if canary_cpu and canary_cpu[1] > 0 else None,  # fraction of one core
         "background_io_mb": round(sum(v for w in worker_out for b, v in (w.get("io_mb_buckets") or {}).items() if win[0] and win[1] and int(win[0] * 10) <= int(b) < int(win[1] * 10)), 3) if real else None,
     }

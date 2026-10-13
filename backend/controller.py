@@ -20,6 +20,18 @@ Differential attribution (specificity-ordered)
     under bandwidth contention (DMA competes for the memory controller). So the
     rule tests the most specific signal first: cpu, then mem, then io.
 
+Contention fingerprinting (portable alternative to the ordered rule)
+    The ordered rule encodes how one machine's canary responds to each kind of
+    contention; on Linux, CFS hides CPU contention from the scheduling-delay
+    component and surfaces it in the read step instead, so the rule misfires.
+    Fingerprinting learns that response instead: at calibration, SmartSwap
+    briefly generates each kind of contention itself and records the canary's
+    inflation vector over its four components (sched, cpu, mem, io). Live
+    inflation is decomposed into a non-negative mix of those fingerprints
+    (exact NNLS over at most three columns), giving the dominant resource and
+    each resource's share. A fingerprint too weak to measure on this machine
+    (e.g. bandwidth contention on a host with spare bandwidth) is dropped.
+
 Escalation ladder (cheapest action first)
     level 1: resource-matched scheduler hint, which costs the background almost
              nothing while the foreground is idle between beats:
@@ -115,6 +127,7 @@ class ControllerConfig:
     enable_steer: bool = False         # hybrid CPUs: try E-core steering before capping
     enable_eco: bool = False           # try EcoQoS (Efficiency mode) before capping
     enable_ladder: bool = True         # ablation: False -> jump straight to the cap
+    fingerprints: dict[str, list[float]] | None = None  # learned contention fingerprints; None -> ordered rule
     act: bool = True                   # False -> observe only (overhead/attribution study)
 
 
@@ -131,6 +144,61 @@ def window_metrics(rows: list[dict[str, float]], cal: Calibration, period_ms: fl
         "io": max(0.0, (med["io"] - cal.io) / max(cal.io, floor)),
     }
     return {"wsi": round(wsi, 3), "excess": {k: round(v, 3) for k, v in excess.items()}, "beats": len(rows), "median_ms": {k: round(v, 4) for k, v in med.items()}}
+
+
+def inflation(med: dict[str, float], cal: Calibration) -> list[float]:
+    """Per-component inflation over idle, in COMPONENTS order (0 = idle, 1 = twice idle)."""
+    floor = 0.05
+    return [max(0.0, (med[k] - getattr(cal, k)) / max(getattr(cal, k), floor)) for k in COMPONENTS]
+
+
+def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:
+    """Gaussian elimination with partial pivoting; None if singular."""
+    n = len(b); m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for c in range(n):
+        piv = max(range(c, n), key=lambda r: abs(m[r][c]))
+        if abs(m[piv][c]) < 1e-12: return None
+        m[c], m[piv] = m[piv], m[c]
+        for r in range(n):
+            if r != c:
+                f = m[r][c] / m[c][c]; m[r] = [x - f * y for x, y in zip(m[r], m[c])]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+
+def nnls(columns: dict[str, list[float]], v: list[float]) -> dict[str, float]:
+    """Exact non-negative least squares by enumerating active sets (fine for <= 3 columns)."""
+    keys = list(columns); best: tuple[float, dict[str, float]] = (sum(x * x for x in v), {k: 0.0 for k in keys})
+    for mask in range(1, 1 << len(keys)):
+        sub = [k for i, k in enumerate(keys) if mask >> i & 1]
+        ata = [[sum(columns[p][i] * columns[q][i] for i in range(len(v))) for q in sub] for p in sub]
+        atb = [sum(columns[p][i] * v[i] for i in range(len(v))) for p in sub]
+        w = _solve(ata, atb)
+        if w is None or any(x < 0 for x in w): continue
+        fit = [sum(w[j] * columns[k][i] for j, k in enumerate(sub)) for i in range(len(v))]
+        resid = sum((a - b) ** 2 for a, b in zip(v, fit))
+        if resid < best[0] - 1e-12: best = (resid, {k: (w[sub.index(k)] if k in sub else 0.0) for k in keys})
+    return best[1]
+
+
+def learn_fingerprint(windows: list[list[dict[str, float]]], cal: Calibration, min_norm: float = 0.5) -> list[float] | None:
+    """Unit inflation vector of one kind of contention from canary windows recorded under it.
+
+    None when the contention barely moves the canary on this machine (norm < min_norm)."""
+    if not windows: return None
+    vecs = [inflation({k: statistics.median(float(r[k]) for r in w) for k in COMPONENTS}, cal) for w in windows if w]
+    med = [statistics.median(v[i] for v in vecs) for i in range(len(COMPONENTS))]
+    norm = sum(x * x for x in med) ** 0.5
+    return [round(x / norm, 4) for x in med] if norm >= min_norm else None
+
+
+def attribute_fingerprint(med: dict[str, float], cal: Calibration, fingerprints: dict[str, list[float]], floor: float) -> tuple[str, float, dict[str, float]]:
+    """Dominant resource, its weight (inflation units), and every resource's share."""
+    columns = {k: v for k, v in fingerprints.items() if v}
+    if not columns: return "none", 0.0, {}
+    w = nnls(columns, inflation(med, cal)); total = sum(w.values())
+    shares = {k: round(x / total, 3) for k, x in w.items()} if total > 0 else {k: 0.0 for k in w}
+    top = max(w, key=w.get)
+    return (top, round(w[top], 3), shares) if w[top] >= floor else ("none", 0.0, shares)
 
 
 def attribute(excess: dict[str, float], floor: float) -> tuple[str, float]:
@@ -188,7 +256,10 @@ class Controller:
         consuming CPU or I/O (None when unknown).
         """
         m = window_metrics(rows[-self.cfg.window_beats:], self.cal, self.period_ms)
-        wsi = m["wsi"]; resource, strength = attribute(m["excess"], self.cfg.attribution_floor)
+        wsi = m["wsi"]; shares = None
+        if self.cfg.fingerprints and m.get("median_ms"): resource, strength, shares = attribute_fingerprint(m["median_ms"], self.cal, self.cfg.fingerprints, self.cfg.attribution_floor)
+        else: resource, strength = attribute(m["excess"], self.cfg.attribution_floor)
+        m["shares"] = shares
         decisions: list[Decision] = []
         self.period_index += 1; self.wsi_history.append(wsi)
         if not self.release_hold: self.release_hold = self.cfg.release_periods
@@ -245,7 +316,8 @@ class Controller:
         return decisions if self.cfg.act else []
 
     def _trace_row(self, t_ms: float, wsi: float, m: dict[str, Any], resource: str, strength: float, decisions: list[Decision]) -> dict[str, Any]:
-        return {"t_ms": round(t_ms, 1), "release_hold": self.release_hold, "wsi": wsi, "excess": m["excess"], "attributed": resource, "strength": strength, "engaged": self.engaged, "level": self.level, "cap": self.cap, "steered": "steer" in self.hints, "eco": "eco" in self.hints, "decisions": [d.kind for d in decisions]}
+        return {"t_ms": round(t_ms, 1), "release_hold": self.release_hold, "wsi": wsi, "excess": m["excess"], "attributed": resource, "strength": strength, "engaged": self.engaged, "level": self.level, "cap": self.cap, "steered": "steer" in self.hints, "eco": "eco" in self.hints, "decisions": [d.kind for d in decisions],
+                "median_ms": m.get("median_ms"), "shares": m.get("shares")}
 
     @property
     def steer_rollbacks(self) -> int:
