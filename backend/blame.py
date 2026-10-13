@@ -339,6 +339,7 @@ class FactorialInterrogator:
     # or pick the wrong lever. The randomized release test measures causation without needing the resource.
     label_free: bool = True
     hold_periods: int = 5
+    innocent_margin: float = 2.0    # WSI points (20 ms/s): a job shown to cause less than this is harmless enough to restore
     held_retest_periods: int = 50   # a held (inconclusive) job is re-tested after this long, so innocent work recovers
     period: int = 0
     nudged: dict[int, str] = field(default_factory=dict)
@@ -389,7 +390,7 @@ class FactorialInterrogator:
                         ev = self.evidence.setdefault(app, [[], [], 0]); ev[0] += y_app; ev[1] += plan; ev[2] += 1; ys, xs = ev[0], ev[1]
                         look_alpha = self.alpha / 2 ** ev[2]
                         effect, p = permutation_effect(ys, xs, seed=self.seed + self.period)
-                        p_inn = innocence_p(ys, xs, self.min_effect, seed=self.seed + self.period)
+                        p_inn = innocence_p(ys, xs, self.innocent_margin, seed=self.seed + self.period)
                         guilty = p < look_alpha and -effect >= self.min_effect
                         innocent = not guilty and p_inn < look_alpha
                         if not guilty and not innocent and e["round"] < self.max_rounds: again.append(app); continue
