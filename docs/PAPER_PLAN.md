@@ -45,6 +45,32 @@ One culprit job and two innocent jobs, all managed, in 4 scenarios (CPU, storage
 
 Scope: the paper is **Windows-only**. A Linux harness exists in the repo (`backend/posix.py`, `research/linux_study.py`) purely as a development sanity check of the code paths. It is not cited as evidence.
 
+## Design history: the first go/no-go failed (internal check, 4 blocks, not paper evidence)
+
+The original CausalShield acted only on *proven* culprits ("guilty until proven"). On the internal check it failed H7 badly:
+
+| Scenario | Lower every job: p95 vs. none / innocent work kept | Proof-first CausalShield: p95 vs. none / innocent work kept |
+|---|---|---|
+| CPU | 0.39 / 0.84 | 0.88 / 1.01 |
+| Storage vs. CPU | 0.57 / 0.95 | 0.71 / 0.97 |
+| Polite hog | 0.73 / 0.99 | 0.94 / 1.01 |
+| Phased culprit | 0.40 / 0.86 | 0.98 / 1.10 |
+
+It kept innocent work (the H6 direction), but it protected the foreground 1.2–2.4× worse than lowering everyone. There were two causes:
+1. No protection while the proof was gathered.
+2. Suspects came from a passive ranking that trusted a mislabelled stall, so the culprit was often never tested.
+
+Two further findings matter for the claims:
+- Lowering every job's **priority** cost innocent jobs only 1–16% of their work. Large innocent losses came from **caps** (the v2 ladder kept only 28–81%).
+- So H6 against priority-lowering has little headroom by construction, while against cap-based policies it has a lot.
+
+The redesign, **presumed guilty**, inverts the burden of proof:
+- every managed job is lowered the moment a stall starts;
+- the randomized experiments become *release* tests;
+- a job whose release brings the stall back stays lowered, and a job whose release changes nothing is restored;
+- an inconclusive job stays lowered (the safe side);
+- every managed job is a candidate, so a mislabelled stall can no longer hide the culprit.
+
 ## Protocol
 
 1. Commit `research/hypotheses.json` **before** collecting v3 data. That commit is the pre-registration.

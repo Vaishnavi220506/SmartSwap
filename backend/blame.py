@@ -298,8 +298,17 @@ class FactorialInterrogator:
     cooldown_periods: int = 50
     min_score: float = 0.02
     seed: int = 0
+    # Presumed guilty: when a stall starts, nudge every candidate at once (immediate protection), hold
+    # `hold_periods`, then run the same randomized experiments as *release* tests. A job whose release
+    # brings the stall back stays nudged; one whose release changes nothing is restored for good; one
+    # still inconclusive after max_rounds stays nudged (the safe side). Candidates are every managed
+    # job, not the passive top-k, so a mislabelled stall cannot hide the culprit.
+    presume_guilty: bool = False
+    hold_periods: int = 5
     period: int = 0
     nudged: dict[int, str] = field(default_factory=dict)
+    held: set[int] = field(default_factory=set)
+    holding: list[Any] | None = None
     confirmed: set[int] = field(default_factory=set)
     exonerated: dict[int, int] = field(default_factory=dict)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
@@ -315,7 +324,14 @@ class FactorialInterrogator:
         if not engaged:
             if self.nudged:
                 out += [BlameDecision("release", app, hint, "stall cleared") for app, hint in sorted(self.nudged.items())]
-                self.nudged.clear(); self.confirmed.clear(); self.experiment = None
+                self.nudged.clear(); self.confirmed.clear(); self.held.clear()
+            self.experiment = None; self.holding = None
+            return out
+        if self.holding is not None:  # presumed guilty: protection first, then the release experiment
+            self.holding[0] -= 1
+            if self.holding[0] <= 0:
+                _, apps, hint, base = self.holding; self.holding = None
+                return out + self._start(apps, hint, base, names, 1, {})
             return out
         e = self.experiment
         if e is not None:
@@ -338,6 +354,9 @@ class FactorialInterrogator:
                     if guilty:
                         if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"confirmed: nudging cut WSI by {-effect:.1f} points (p={p:.3f}, {e['round']} rounds)")); self.nudged[app] = e["hint"]
                         self.confirmed.add(app)
+                    elif self.presume_guilty and p < self.inconclusive_p and -effect >= self.min_effect / 2:
+                        self.verdicts[-1]["verdict"] = "held"; self.held.add(app)  # not proven innocent: stay on the safe side
+                        if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"inconclusive after {e['round']} rounds: kept lowered")); self.nudged[app] = e["hint"]
                     else:
                         self.exonerated[app] = self.period + self.cooldown_periods
                         if app in self.nudged: out.append(BlameDecision("release", app, self.nudged.pop(app), f"exonerated: effect {effect:+.1f} WSI points (p={p:.2f})"))
@@ -345,7 +364,14 @@ class FactorialInterrogator:
             return out
         recent = statistics.fmean(wsi_history[-5:]) if wsi_history else 0.0
         if recent <= self.slo_wsi or resource not in HINTS: return out
-        pool = [s for s in ranked if not s.protected and s.app not in self.confirmed and self.exonerated.get(s.app, -1) <= self.period and s.usage > 0 and s.score >= self.min_score][: self.k]
+        eligible = [s for s in ranked if not s.protected and s.app not in self.confirmed and s.app not in self.held and self.exonerated.get(s.app, -1) <= self.period and s.usage > 0]
+        if self.presume_guilty:
+            pool = eligible[: max(self.k, 6)]
+            if not pool: return out
+            for x in pool: out += self._set(x.app, HINTS[resource], True, f"presumed guilty while the stall is investigated ({len(pool)} jobs lowered)")
+            self.holding = [self.hold_periods, [x.app for x in pool], HINTS[resource], recent]
+            return out
+        pool = [s for s in eligible if s.score >= self.min_score][: self.k]
         if not pool: return out
         return out + self._start([x.app for x in pool], HINTS[resource], recent, names, 1, {})
 

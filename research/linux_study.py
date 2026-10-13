@@ -203,7 +203,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
                 from backend.blame import FactorialInterrogator
                 from backend.remedy import Optimizer
                 from backend.shield import Shield, ladder_for
-                shield = Shield(blamer, FactorialInterrogator(slo_wsi=cfg.slo_wsi, seed=seed), Optimizer(slo_wsi=cfg.slo_wsi, ladder=ladder_for("linux")))
+                shield = Shield(blamer, FactorialInterrogator(slo_wsi=cfg.slo_wsi, seed=seed, presume_guilty=True), Optimizer(slo_wsi=cfg.slo_wsi, ladder=ladder_for("linux")))
                 interrogator = shield.interrogator
                 app_act = {a["proc"].pid: Actuator([a["proc"].pid], ledger, f"smartswap-{os.getpid()}-{int(t0 * 1000)}-{a['proc'].pid}") for a in apps}
             if policy in MODES: interrogator = make_interrogator(policy, slo_wsi=cfg.slo_wsi, eval_periods=cfg.benefit_eval_periods, min_reduction=cfg.benefit_min_reduction, seed=seed)
@@ -340,9 +340,10 @@ def run(args: argparse.Namespace) -> Path:
     if trials.exists():
         for l in trials.read_text().splitlines():
             if l.strip(): r = json.loads(l); done.add((r["block"], r["preset"], r["policy"]))
-    rng = random.Random(args.seed); total = args.blocks * len(cells(args.design)); count = len(done)
+    keep = lambda cs: [c for c in cs if not args.policies or c[1] in args.policies.split(",")]
+    rng = random.Random(args.seed); total = args.blocks * len(keep(cells(args.design))); count = len(done)
     for block in range(args.blocks):
-        order = cells(args.design); rng.shuffle(order)
+        order = keep(cells(args.design)); rng.shuffle(order)
         if all((block, p, q) in done for p, q in order): continue
         time.sleep(2); cal = calibrate(); fps = learn_fingerprints(cal) if args.fingerprint else None
         if fps: print(f"block {block} fingerprints: {fps}", flush=True)
@@ -437,6 +438,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter); sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run"); r.add_argument("--design", choices=["validity", "mitigation", "blame", "tradeoff"], required=True); r.add_argument("--blocks", type=int, default=8)
     r.add_argument("--seed", type=int, default=20261013); r.add_argument("--study-id"); r.add_argument("--out", type=Path, default=DATA / "results")
+    r.add_argument("--policies", default=None, help="comma-separated subset of the design's policies to run")
     r.add_argument("--fingerprint", action="store_true", help="learn contention fingerprints per block and attribute with them")
     a = sub.add_parser("analyze"); a.add_argument("study", type=Path); a.add_argument("--out", type=Path)
     args = ap.parse_args()

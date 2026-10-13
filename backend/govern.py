@@ -199,7 +199,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
             from .blame import FactorialInterrogator
             from .remedy import Optimizer
             from .shield import Shield, ladder_for
-            shield = Shield(blamer, FactorialInterrogator(slo_wsi=controller.cfg.slo_wsi, seed=seed), Optimizer(slo_wsi=controller.cfg.slo_wsi, ladder=ladder_for("windows")))
+            shield = Shield(blamer, FactorialInterrogator(slo_wsi=controller.cfg.slo_wsi, seed=seed, presume_guilty=True), Optimizer(slo_wsi=controller.cfg.slo_wsi, ladder=ladder_for("windows")))
             interrogator = shield.interrogator
             for a in apps:
                 app_act[a["proc"].pid] = Actuator([a["proc"].pid], ledger, f"{name}-{a['proc'].pid}", track_children=True); app_act[a["proc"].pid].refresh()
