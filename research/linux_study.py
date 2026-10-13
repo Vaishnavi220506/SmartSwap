@@ -42,7 +42,7 @@ from typing import Any
 import psutil
 
 from backend import posix
-from backend.blame import MODES, Blamer, make_interrogator
+from backend.blame import CALM_SNAPSHOT_EVERY, MODES, Blamer, make_interrogator
 from backend.controller import Calibration, Controller, ControllerConfig, learn_fingerprint
 from backend.engine import CANARY_ENV, CONTROL_PERIOD_S, FG_ENV, Ledger, summarize_rows
 from backend.govern import scenarios
@@ -208,7 +208,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
         def loop() -> None:
             nonlocal overhead
             from backend.govern import snapshot
-            last = posix.psi_totals(); last_t = time.time(); label_of = {a["proc"].pid: a["label"] for a in apps}
+            last = posix.psi_totals(); last_t = time.time(); label_of = {a["proc"].pid: a["label"] for a in apps}; last_snap = None; tick_n = 0
             while not stop.wait(CONTROL_PERIOD_S):
                 tick = time.process_time(); now = posix.psi_totals(); now_t = time.time()
                 psi = {k: round(min(100.0, 100 * (now[k] - last.get(k, now[k])) / 1e6 / max(1e-3, now_t - last_t)), 3) for k in now}; last, last_t = now, now_t
@@ -216,9 +216,12 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
                 for d in controller.step((now_t - t0) * 1000, rows[-cfg.window_beats:], None):
                     if actuator: actuator.apply(d)
                 row = controller.trace[-1]; row["psi"] = psi
-                if blamer is not None:
-                    snap = snapshot(); outside = {p.pid for p in snap if p.pid not in mine and psutil.pid_exists(p.pid) and not _descends(p.pid, mine)}
-                    blamer.update(snap, row["wsi"], row["excess"])
+                tick_n += 1
+                if blamer is not None and (controller.engaged or tick_n % CALM_SNAPSHOT_EVERY == 0):
+                    snap = snapshot(); snap_t = time.time()
+                    tree = {os.getpid()} | {c.pid for c in psutil.Process().children(recursive=True)}
+                    outside = {p.pid for p in snap} - tree
+                    blamer.update(snap, row["wsi"], row["excess"], elapsed_s=(snap_t - last_snap) if last_snap else None); last_snap = snap_t
                     for app in list(blamer.protected): blamer.protected[app] = blamer.protected[app] or app in outside
                     if interrogator is not None:
                         ranked = blamer.top_cpu() if policy == "top_cpu" else blamer.rank(row["attributed"] if row["attributed"] != "none" else controller.resource)

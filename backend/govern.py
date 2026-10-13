@@ -32,7 +32,7 @@ from typing import Any
 import psutil
 
 from . import native
-from .blame import MODES, PROTECTED_NAMES, Blamer, BlameDecision, ProcSample, make_interrogator
+from .blame import CALM_SNAPSHOT_EVERY, MODES, PROTECTED_NAMES, Blamer, BlameDecision, ProcSample, make_interrogator
 from .controller import Calibration, Controller, ControllerConfig
 from .engine import (CANARY_ENV, CONTROL_PERIOD_S, CPU_COUNT, DATA_DIR, FG_ENV, Ledger, _env, _reap, _spawn, ensure_data_files, summarize_rows)
 from .probes import LAUNCHER, PROBE, WORKER
@@ -195,12 +195,14 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
 
         def loop() -> None:
             nonlocal overhead_s
-            label_of = {a["proc"].pid: a["label"] for a in apps}
+            label_of = {a["proc"].pid: a["label"] for a in apps}; last_snap = None; tick_n = 0
             while not stop.wait(CONTROL_PERIOD_S):
                 tick = time.process_time()
                 controller.step((time.time() - t0) * 1000, canary_rows[-controller.cfg.window_beats:], None)
                 row = controller.trace[-1]
-                blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid())
+                tick_n += 1
+                if controller.engaged or tick_n % CALM_SNAPSHOT_EVERY == 0:  # full rate only while a stall is engaged
+                    snap_t = time.time(); blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid(), elapsed_s=(snap_t - last_snap) if last_snap else None); last_snap = snap_t
                 if interrogator is not None:
                     ranked = blamer.top_cpu() if mode == "top_cpu" else blamer.rank(row["attributed"] if row["attributed"] != "none" else controller.resource)
                     seen = len(interrogator.verdicts)

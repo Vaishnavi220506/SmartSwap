@@ -31,7 +31,23 @@ Scope: the paper is **Windows-only**. A Linux harness exists in the repo (`backe
 4. Secondary results (per-design `RESULTS.md`) are exploratory, with Holm within each design.
 5. `blocks_for_80pct_power` in each comparison says whether a null result is a real null or underpowered.
 
+## Method-level evidence already in hand (simulation, OS-independent)
+
+`python -m research.simulate_blame` drives the real decision code against a toy desktop where background load steps during the first test (300 runs per cell, culprit effect 6 WSI points, noise sd 1, innocent app ranked first):
+
+| Load drift during test | One-at-a-time: innocent blamed | Factorial: innocent blamed | Factorial: culprit missed |
+|---:|---:|---:|---:|
+| -8 | 51.7% | 2.3% | 49.7% |
+| -4 | 25.0% | 2.3% | 0.7% |
+| 0 | 0.0% | 4.3% | 0.0% |
+| +4 | 0.0% (culprit missed 46%) | 4.3% | 0.0% |
+
+Randomization holds false blame at about the test's 5% level whatever the drift. Sequential testing does not. The price is power: under very large drops, the factorial design misses the culprit more often and retries it later. Report both sides.
+
 ## Threats to validity (write these into the paper)
+
+- **Blame inherits attribution errors.** In the internal Linux check, the ordered rule labelled CPU contention as storage about 90% of the time. Every blame method that trusts the label then tested the wrong suspects with the wrong lever, and only the label-free top-CPU heuristic succeeded. Fingerprinting (C2) is the fix, and the Windows `attribution` design checks it per host.
+- **Blame overhead.** A full process snapshot every 200 ms cost about 17% of one core in the internal check. Snapshots now run at 1 Hz while calm and at full rate only during an engaged stall. Report the measured `governor_cpu_share` per host.
 
 - **Intervention confounding**: if load changes during a test window, blame can be wrong. Mitigations: one suspect at a time, an 8-period window, retesting while the stall persists, exoneration cooldown. Measured by: wrong nudges, and verdict accuracy against ground truth.
 - **Memory-bandwidth blame uses CPU time as a proxy** (bandwidth is not observable per process in user mode). `membw_polite` tests the case where this proxy misleads.

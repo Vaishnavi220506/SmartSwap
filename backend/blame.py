@@ -79,6 +79,7 @@ PROTECTED_NAMES = frozenset({
     "audiodg.exe", "explorer.exe", "sihost.exe", "ctfmon.exe", "msmpeng.exe", "securityhealthservice.exe",
 })
 MODES = ("top_cpu", "passive", "interventional", "factorial")
+CALM_SNAPSHOT_EVERY = 5  # control periods between process snapshots while no stall is engaged (1 Hz at 200 ms)
 
 
 @dataclass(frozen=True)
@@ -154,7 +155,10 @@ class Blamer:
     io: list[dict[int, float]] = field(default_factory=list)    # per period: app -> MB/s
     signal: list[dict[str, float]] = field(default_factory=list)  # per period: wsi + excess per resource
 
-    def update(self, snapshot: list[ProcSample], wsi: float, excess: dict[str, float], foreground: int | None = None) -> None:
+    def update(self, snapshot: list[ProcSample], wsi: float, excess: dict[str, float], foreground: int | None = None, elapsed_s: float | None = None) -> None:
+        """Add one observation. `elapsed_s` is the time since the previous snapshot (default: one control period),
+        so callers may snapshot at a lower rate while the desktop is calm."""
+        dt = elapsed_s or self.period_s
         roots = app_roots(snapshot, self.stop_pids)
         fg_root = roots.get(foreground) if foreground else None
         cpu: dict[int, float] = {}; io: dict[int, float] = {}; members: dict[int, list[int]] = {}
@@ -163,8 +167,8 @@ class Blamer:
             if p.pid in self.exclude_pids or prev is None or prev.create_time != p.create_time: continue
             root = roots[p.pid]
             if root in self.exclude_pids: continue
-            cpu[root] = cpu.get(root, 0.0) + max(0.0, p.cpu_s - prev.cpu_s) / self.period_s
-            io[root] = io.get(root, 0.0) + max(0.0, p.io_bytes - prev.io_bytes) / 1e6 / self.period_s
+            cpu[root] = cpu.get(root, 0.0) + max(0.0, p.cpu_s - prev.cpu_s) / dt
+            io[root] = io.get(root, 0.0) + max(0.0, p.io_bytes - prev.io_bytes) / 1e6 / dt
             members.setdefault(root, []).append(p.pid)
         by_pid = {p.pid: p for p in snapshot}
         for root, pids in members.items():

@@ -545,11 +545,14 @@ class LiveMonitor:
 
     def _blame(self) -> None:
         """Rank suspects against the previous control period's WSI (and act, if governing)."""
+        from . import blame
         from .govern import snapshot
         ctl = self.controller
         if ctl is None or not ctl.trace or self.blamer is None: return
-        row = ctl.trace[-1]
-        self.blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid())
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        if not ctl.engaged and self._ticks % blame.CALM_SNAPSHOT_EVERY: return  # 1 Hz while calm
+        row = ctl.trace[-1]; now = time.time(); last = getattr(self, "_last_snap", None); self._last_snap = now
+        self.blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid(), elapsed_s=(now - last) if last else None)
         resource = row["attributed"] if row["attributed"] != "none" else ctl.resource
         ranked = self.blamer.rank(resource) if resource in ("cpu", "mem", "io") else []
         self.suspects = [s.as_dict() for s in ranked[:5]]
