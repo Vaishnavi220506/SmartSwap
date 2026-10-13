@@ -97,6 +97,18 @@ def host_manifest() -> dict:
     }
 
 
+def wait_for_quiet(threshold: float = 15.0, max_wait_s: float = 30.0) -> tuple[float, float]:
+    """Wait until non-study CPU load (1 s samples) is below `threshold` %, up to `max_wait_s`.
+
+    Returns (load just before the trial, seconds waited). A Windows update, indexer, or AV scan
+    starting mid-study would otherwise silently contaminate trials; the load is recorded as a
+    covariate either way, and analysis can exclude trials that started on a busy machine.
+    """
+    start = time.time(); load = psutil.cpu_percent(interval=1.0)
+    while load >= threshold and time.time() - start < max_wait_s: load = psutil.cpu_percent(interval=1.0)
+    return load, round(time.time() - start, 1)
+
+
 def done_cells(path: Path) -> set[tuple[int, str, str]]:
     if not path.exists(): return set()
     out = set()
@@ -141,14 +153,14 @@ def main() -> None:
         if fps: print(f"block {block} fingerprints: {fps}", flush=True)
         for position, (preset, policy) in enumerate(order):
             if (block, preset, policy) in finished: continue
-            host_load = psutil.cpu_percent(interval=1.0)  # covariate: non-study load just before the trial
+            host_load, waited = wait_for_quiet()  # covariate: non-study load just before the trial
             if args.design in ("blame", "tradeoff"):
                 from backend.govern import run_blame_trial
                 result = run_blame_trial(preset, policy, cal, seed=block * 100 + position, fingerprints=fps)
                 result.update(preset=preset, policy=policy, background_units_per_s={})
             else:
                 result = run_trial(preset, policy, cal, seed=block * 100 + position, foreground=foreground, fingerprints=fps)
-            result.update(block=block, position=position, study_id=study_id, host_cpu_pct_before=host_load)
+            result.update(block=block, position=position, study_id=study_id, host_cpu_pct_before=host_load, quiet_wait_s=waited, started_busy=host_load >= 15.0)
             with trials_path.open("a", encoding="utf-8") as handle: handle.write(json.dumps(result) + "\n")
             count += 1
             f = result["foreground"]; eta = (time.time() - t_start) / max(1, count - len(finished)) * (total - count)

@@ -101,6 +101,7 @@ The second run of presumed guilty still failed. Its logs showed the CPU culprit 
 3. `python -m research.pool <all study dirs>` → `POOLED.md`. Report H1–H7 exactly as they come out, including any that fail.
 4. Secondary results (per-design `RESULTS.md`) are exploratory, with Holm within each design.
 5. `blocks_for_80pct_power` in each comparison says whether a null result is a real null or underpowered.
+6. Each trial waits for a quiet machine (non-study CPU under 15%, up to 30 s) and records `started_busy`. Report a sensitivity analysis that excludes busy-start trials. A rebooted internal VM showed 10-20× latency spikes for its first minutes, so also discard any block that starts within 2 minutes of boot or wake.
 
 ## Method-level evidence already in hand (simulation, OS-independent)
 
