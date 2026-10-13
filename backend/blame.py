@@ -132,6 +132,7 @@ class Suspect:
     usage: float        # mean matched usage over the horizon (cores or MB/s)
     cpu_cores: float    # mean CPU cores over the horizon
     protected: bool
+    io_mbps: float = 0.0  # mean I/O MB/s over the horizon
 
     def as_dict(self) -> dict[str, Any]:
         return {"app": self.app, "name": self.name, "pids": len(self.pids), "score": round(self.score, 4), "share_hot": round(self.share_hot, 4),
@@ -193,7 +194,8 @@ class Blamer:
             share_hot = sum(usage[i].get(app, 0.0) for i in hot) / hot_total if hot_total > 0 else 0.0
             rho = _spearman(x, y)
             out.append(Suspect(app, self.names.get(app, "?"), self.members.get(app, []), max(0.0, share_hot * (1 + rho)), share_hot, rho,
-                               statistics.fmean(x), statistics.fmean(period.get(app, 0.0) for period in self.cpu), self.protected.get(app, False)))
+                               statistics.fmean(x), statistics.fmean(period.get(app, 0.0) for period in self.cpu), self.protected.get(app, False),
+                               statistics.fmean(period.get(app, 0.0) for period in self.io)))
         return sorted(out, key=lambda s: (-s.score, -s.usage, s.app))
 
     def top_cpu(self, window: int = 10) -> list[Suspect]:
@@ -304,6 +306,10 @@ class FactorialInterrogator:
     # still inconclusive after max_rounds stays nudged (the safe side). Candidates are every managed
     # job, not the passive top-k, so a mislabelled stall cannot hide the culprit.
     presume_guilty: bool = False
+    # Label-free (with presume_guilty): lower both CPU and I/O priority and consider every active managed
+    # job, so a mislabelled stall (e.g. CPU contention that looks like storage) cannot hide the culprit
+    # or pick the wrong lever. The randomized release test measures causation without needing the resource.
+    label_free: bool = True
     hold_periods: int = 5
     period: int = 0
     nudged: dict[int, str] = field(default_factory=dict)
@@ -364,12 +370,14 @@ class FactorialInterrogator:
             return out
         recent = statistics.fmean(wsi_history[-5:]) if wsi_history else 0.0
         if recent <= self.slo_wsi or resource not in HINTS: return out
-        eligible = [s for s in ranked if not s.protected and s.app not in self.confirmed and s.app not in self.held and self.exonerated.get(s.app, -1) <= self.period and s.usage > 0]
+        free = self.presume_guilty and self.label_free
+        active = (lambda s: s.cpu_cores > 0.05 or s.io_mbps > 0.5 or s.usage > 0) if free else (lambda s: s.usage > 0)
+        eligible = [s for s in ranked if not s.protected and s.app not in self.confirmed and s.app not in self.held and self.exonerated.get(s.app, -1) <= self.period and active(s)]
         if self.presume_guilty:
-            pool = eligible[: max(self.k, 6)]
+            pool = eligible[: max(self.k, 6)]; hint = "both" if free else HINTS[resource]
             if not pool: return out
-            for x in pool: out += self._set(x.app, HINTS[resource], True, f"presumed guilty while the stall is investigated ({len(pool)} jobs lowered)")
-            self.holding = [self.hold_periods, [x.app for x in pool], HINTS[resource], recent]
+            for x in pool: out += self._set(x.app, hint, True, f"presumed guilty while the stall is investigated ({len(pool)} jobs lowered)")
+            self.holding = [self.hold_periods, [x.app for x in pool], hint, recent]
             return out
         pool = [s for s in eligible if s.score >= self.min_score][: self.k]
         if not pool: return out

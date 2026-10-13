@@ -136,5 +136,5 @@ def test_presumed_guilty_protects_at_once_then_restores_the_innocent() -> None:
     it = FactorialInterrogator(seed=3, presume_guilty=True)
     history = simulate(it, lambda t: 2.0, {1: 8.0}, [suspect(2, 0.9), suspect(1, 0.0)], 90)  # culprit ranked last, score 0
     assert history[2] < 5.0                     # lowered from the first stalled period: protection does not wait for proof
-    assert it.nudged == {1: "priority"}         # the innocent job got its priority back
+    assert it.nudged == {1: "both"}             # the innocent job got its priorities back; the culprit keeps both levers
     assert {v["app"]: v["verdict"] for v in it.verdicts} == {1: "confirmed", 2: "exonerated"}

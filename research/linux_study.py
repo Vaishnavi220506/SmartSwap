@@ -244,7 +244,8 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
                         seen = len(interrogator.verdicts)
                         for op in shield.step(controller, row["attributed"] if row["attributed"] != "none" else controller.resource, blamer.names):
                             ops_log.append({"t_s": round(time.time() - t_ready, 3), "op": list(op)})
-                            if op[0] == "hint" and op[1] in app_act: (app_act[op[1]].hint if op[3] else app_act[op[1]].revert)(op[2], "blame micro-experiment")
+                            if op[0] == "hint" and op[1] in app_act:
+                                for kind in (("priority", "io_priority") if op[2] == "both" else (op[2],)): (app_act[op[1]].hint if op[3] else app_act[op[1]].revert)(kind, "blame micro-experiment")
                             elif op[0] == "level" and op[1] in app_act:
                                 act = app_act[op[1]]
                                 if op[2].startswith("cap"): act.set_cap(float(op[2][3:]), "minimum intervention")

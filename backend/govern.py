@@ -232,8 +232,9 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
                         ops_log.append({"t_s": round(time.time() - t_ready, 3), "op": list(op)}); act = app_act.get(op[1]) if op[0] != "fallback" else None
                         if op[0] == "hint" and act:
                             act.refresh()
-                            if op[3]: (act.cpu_hint if op[2] == "priority" else act.io_hint)("blame micro-experiment")
-                            else: act.revert_hint(op[2], "blame micro-experiment")
+                            for kind in (("priority", "io_priority") if op[2] == "both" else (op[2],)):
+                                if op[3]: (act.cpu_hint if kind == "priority" else act.io_hint)("blame micro-experiment")
+                                else: act.revert_hint(kind, "blame micro-experiment")
                             if op[3]: events.append({"t_s": round(time.time() - t_ready, 3), "app": op[1], "label": label_of.get(op[1], "?"), "kind": "nudge", "correct": op[1] == culprit_root})
                         elif op[0] == "level" and act:
                             act.refresh()
