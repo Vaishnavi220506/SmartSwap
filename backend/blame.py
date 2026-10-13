@@ -292,7 +292,7 @@ class FactorialInterrogator:
     slo_wsi: float = 3.0
     k: int = 3
     slots: int = 8                  # balanced: each suspect is nudged in exactly slots/2 of them
-    slot_periods: int = 3           # the first period of a slot lets the canary window refill
+    slot_periods: int = 2           # the first period of a slot lets the canary window (8 beats = 320 ms) refill
     alpha: float = 0.05
     min_effect: float = 1.0         # WSI points; smaller effects are not worth a nudge
     max_rounds: int = 3             # inconclusive suspects get up to this many randomized rounds, pooled
@@ -311,9 +311,10 @@ class FactorialInterrogator:
     # or pick the wrong lever. The randomized release test measures causation without needing the resource.
     label_free: bool = True
     hold_periods: int = 5
+    held_retest_periods: int = 50   # a held (inconclusive) job is re-tested after this long, so innocent work recovers
     period: int = 0
     nudged: dict[int, str] = field(default_factory=dict)
-    held: set[int] = field(default_factory=set)
+    held: dict[int, int] = field(default_factory=dict)  # app -> period at which it is re-tested
     holding: list[Any] | None = None
     confirmed: set[int] = field(default_factory=set)
     exonerated: dict[int, int] = field(default_factory=dict)
@@ -361,7 +362,7 @@ class FactorialInterrogator:
                         if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"confirmed: nudging cut WSI by {-effect:.1f} points (p={p:.3f}, {e['round']} rounds)")); self.nudged[app] = e["hint"]
                         self.confirmed.add(app)
                     elif self.presume_guilty and p < self.inconclusive_p and -effect >= self.min_effect / 2:
-                        self.verdicts[-1]["verdict"] = "held"; self.held.add(app)  # not proven innocent: stay on the safe side
+                        self.verdicts[-1]["verdict"] = "held"; self.held[app] = self.period + self.held_retest_periods  # not proven innocent: stay on the safe side
                         if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"inconclusive after {e['round']} rounds: kept lowered")); self.nudged[app] = e["hint"]
                     else:
                         self.exonerated[app] = self.period + self.cooldown_periods
@@ -369,6 +370,11 @@ class FactorialInterrogator:
                 if again: out += self._start(again, e["hint"], e["baseline"], names, e["round"] + 1, e["hist"])
             return out
         recent = statistics.fmean(wsi_history[-5:]) if wsi_history else 0.0
+        due = [a for a, t in self.held.items() if t <= self.period]
+        if due:  # re-test held jobs even if the desktop is calm now: calm may be *because* they are lowered
+            hint = self.nudged.get(due[0], "both" if self.presume_guilty and self.label_free else HINTS.get(resource, "priority"))
+            for a in due: del self.held[a]
+            return out + self._start(due, hint, recent, names, 1, {})
         if recent <= self.slo_wsi or resource not in HINTS: return out
         free = self.presume_guilty and self.label_free
         active = (lambda s: s.cpu_cores > 0.05 or s.io_mbps > 0.5 or s.usage > 0) if free else (lambda s: s.usage > 0)
