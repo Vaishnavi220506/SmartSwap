@@ -158,7 +158,7 @@ def scenarios() -> dict[str, dict[str, Any]]:
 
 
 BLAME_MODES = ("none", "oracle", *MODES)
-BLAME_FG_DURATION_S = 14.0
+BLAME_FG_DURATION_S = 24.0  # long enough for up to 3 randomized rounds (about 5 s each) in every mode
 
 
 def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: int = 0, cancel: threading.Event | None = None) -> dict[str, Any]:

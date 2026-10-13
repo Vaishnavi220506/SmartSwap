@@ -293,6 +293,8 @@ class FactorialInterrogator:
     slot_periods: int = 3           # the first period of a slot lets the canary window refill
     alpha: float = 0.05
     min_effect: float = 1.0         # WSI points; smaller effects are not worth a nudge
+    max_rounds: int = 3             # inconclusive suspects get up to this many randomized rounds, pooled
+    inconclusive_p: float = 0.3     # below this (with a promising effect) a suspect earns another round
     cooldown_periods: int = 50
     min_score: float = 0.02
     seed: int = 0
@@ -322,31 +324,39 @@ class FactorialInterrogator:
             if pos == 0 and slot < self.slots:  # next slot: switch every suspect to its assignment
                 for app, plan in e["plan"].items(): out += self._set(app, e["hint"], bool(plan[slot]), f"micro-experiment slot {slot + 1}/{self.slots}")
             if slot >= self.slots:
-                self.experiment = None
-                y = [statistics.fmean(v) if v else 0.0 for v in e["y"]]
+                self.experiment = None; look_alpha = self.alpha / self.max_rounds  # Bonferroni over the planned looks
+                y = [statistics.fmean(v) if v else 0.0 for v in e["y"]]; again = []
                 for app, plan in e["plan"].items():
-                    effect, p = permutation_effect(y, plan, seed=self.seed + self.period)
-                    guilty = p < self.alpha and -effect >= self.min_effect
+                    ys, xs = e["hist"].setdefault(app, ([], [])); ys += y; xs += plan
+                    effect, p = permutation_effect(ys, xs, seed=self.seed + self.period)
+                    guilty = p < look_alpha and -effect >= self.min_effect
+                    if not guilty and e["round"] < self.max_rounds and p < self.inconclusive_p and -effect >= self.min_effect / 2:
+                        again.append(app); continue  # promising but not yet significant: pool another round
                     self.verdicts.append({"period": self.period, "app": app, "name": names.get(app, "?"), "verdict": "confirmed" if guilty else "exonerated",
-                                          "effect_wsi": round(effect, 3), "p": round(p, 4), "bill_ms_per_s": round(max(0.0, -effect) * 10, 1),
+                                          "effect_wsi": round(effect, 3), "p": round(p, 4), "rounds": e["round"], "bill_ms_per_s": round(max(0.0, -effect) * 10, 1),
                                           "wsi_before": round(e["baseline"], 3), "wsi_after": round(statistics.fmean(y), 3)})
                     if guilty:
-                        if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"confirmed: nudging cut WSI by {-effect:.1f} points (p={p:.3f})")); self.nudged[app] = e["hint"]
+                        if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"confirmed: nudging cut WSI by {-effect:.1f} points (p={p:.3f}, {e['round']} rounds)")); self.nudged[app] = e["hint"]
                         self.confirmed.add(app)
                     else:
                         self.exonerated[app] = self.period + self.cooldown_periods
                         if app in self.nudged: out.append(BlameDecision("release", app, self.nudged.pop(app), f"exonerated: effect {effect:+.1f} WSI points (p={p:.2f})"))
+                if again: out += self._start(again, e["hint"], e["baseline"], names, e["round"] + 1, e["hist"])
             return out
         recent = statistics.fmean(wsi_history[-5:]) if wsi_history else 0.0
         if recent <= self.slo_wsi or resource not in HINTS: return out
         pool = [s for s in ranked if not s.protected and s.app not in self.confirmed and self.exonerated.get(s.app, -1) <= self.period and s.usage > 0 and s.score >= self.min_score][: self.k]
         if not pool: return out
-        rng = random.Random(self.seed * 7919 + self.period); plan = {}
-        for s in pool:
-            assignment = [1] * (self.slots // 2) + [0] * (self.slots - self.slots // 2); rng.shuffle(assignment); plan[s.app] = assignment
-        hint = HINTS[resource]
-        self.experiment = {"plan": plan, "hint": hint, "tick": 0, "y": [[] for _ in range(self.slots)], "baseline": recent}
-        for app, a in plan.items(): out += self._set(app, hint, bool(a[0]), f"micro-experiment over {len(plan)} suspects ({', '.join(names.get(x, '?') for x in plan)}), slot 1/{self.slots}")
+        return out + self._start([x.app for x in pool], HINTS[resource], recent, names, 1, {})
+
+    def _start(self, apps: list[int], hint: str, baseline: float, names: dict[int, str], rnd: int, hist: dict[int, Any]) -> list[BlameDecision]:
+        """Begin one randomized round: each suspect nudged in a fresh random, balanced half of the slots."""
+        rng = random.Random(self.seed * 7919 + self.period * 31 + rnd); plan = {}
+        for app in apps:
+            assignment = [1] * (self.slots // 2) + [0] * (self.slots - self.slots // 2); rng.shuffle(assignment); plan[app] = assignment
+        self.experiment = {"plan": plan, "hint": hint, "tick": 0, "y": [[] for _ in range(self.slots)], "baseline": baseline, "round": rnd, "hist": hist}
+        out: list[BlameDecision] = []
+        for app, a in plan.items(): out += self._set(app, hint, bool(a[0]), f"micro-experiment round {rnd} over {len(plan)} suspects ({', '.join(names.get(x, '?') for x in plan)}), slot 1/{self.slots}")
         return out
 
 

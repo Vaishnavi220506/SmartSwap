@@ -53,7 +53,7 @@ DATA = Path(os.environ.get("SS_DATA", Path.home() / ".smartswap"))
 PRESETS = {"idle": [], "cpu": [("cpu", 2 * N)], "membw": [("membw", max(2, N // 2))], "io": [("io", 16)],
            "mixed": [("cpu", N), ("membw", max(1, N // 4)), ("io", 4)]}
 BLAME_MODES = ["none", "oracle", *MODES]
-FG_BLAME_S = 14.0
+FG_BLAME_S = 24.0
 
 
 def cells(design: str) -> list[tuple[str, str]]:

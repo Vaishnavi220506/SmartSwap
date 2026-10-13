@@ -12,7 +12,7 @@ The headline idea is to treat interference attribution as a causal-inference pro
 |---|---|---|---|---|
 | C1 | **WSI**: a PSI-style stall index for Windows, measured by a low-duty canary with no admin rights, drivers, ETW or hardware counters | Linux has PSI; Windows has no equivalent, privileged or not | `main`, `realapp`: Spearman ρ between WSI and a *real app's* UI latency (Notepad `WM_NULL` round trip); ROC AUC; false alarms; canary CPU share | H2 |
 | C2 | **Self-calibrating attribution by contention fingerprinting.** At calibration, the PC briefly generates CPU, bandwidth and storage contention itself and learns how each one distorts the canary's 4 timing components. Live stalls are decomposed (exact NNLS) into a non-negative mix of those fingerprints, giving the dominant resource *and its share* ("70% storage, 30% CPU"). A fingerprint too weak to measure on that PC is dropped | No hardware counters needed. The response is learned per machine instead of hand-ordered, so it adapts to each CPU, storage stack and Windows build, and mixed interference gets shares instead of one label | `attribution` (observe-only): the ordered rule vs. fingerprints scored on *the same* stalled periods, per host; shares under mixed load | secondary (exploratory, per host) |
-| C3 | **Causal culprit blame by randomized factorial micro-experiments.** Passive ranking (share of matched usage while stalled × (1 + Spearman ρ)) picks up to 3 suspects. Each is then nudged in a random, balanced half of 8 short slots (about 5 s), independently of the others. The difference in mean WSI estimates each suspect's causal effect, and a permutation test gives its p-value. The effect also gives a per-app interference bill in ms/s | Task Manager ranks by usage. Interference work (Bubble-Up, CPI², Heracles, PARTIES) is datacenter-side and needs counters or cooperating apps. Here, blame is a *randomized experiment on an unmodified desktop*: it is robust to load drift, unlike one-at-a-time tests (shown in simulation, `research/simulate_blame.py`), and it is parallel over suspects | `blame`: precision@1 of the *kept* blame, probe nudges spent, time to culprit, p95 vs. oracle. 4 ground-truth scenarios: one where the top-CPU app is innocent, an IDLE-priority "polite hog", and a phased culprit that drifts mid-test. Compared with top-CPU, passive, and one-at-a-time intervention. Plus the drift simulation | H1 |
+| C3 | **Causal culprit blame by randomized factorial micro-experiments.** Passive ranking (share of matched usage while stalled × (1 + Spearman ρ)) picks up to 3 suspects. Each is then nudged in a random, balanced half of 8 short slots (about 5 s), independently of the others. A suspect whose result is promising but not yet significant gets up to 2 more randomized rounds, pooled, with α split across the looks. The difference in mean WSI estimates each suspect's causal effect, and a permutation test gives its p-value. The effect also gives a per-app interference bill in ms/s | Task Manager ranks by usage. Interference work (Bubble-Up, CPI², Heracles, PARTIES) is datacenter-side and needs counters or cooperating apps. Here, blame is a *randomized experiment on an unmodified desktop*: it is robust to load drift, unlike one-at-a-time tests (shown in simulation, `research/simulate_blame.py`), and it is parallel over suspects | `blame`: precision@1 of the *kept* blame, probe nudges spent, time to culprit, p95 vs. oracle. 4 ground-truth scenarios: one where the top-CPU app is innocent, an IDLE-priority "polite hog", and a phased culprit that drifts mid-test. Compared with top-CPU, passive, and one-at-a-time intervention. Plus the drift simulation | H1 |
 | C4 | **Resource-matched, benefit-checked ladder**: priority → E-core steering → EcoQoS → AIMD cap, each rung rolled back if the canary shows no benefit | It compares against, and builds on, the OS's own Efficiency mode | `ecoqos`, `hybrid`, `real`: p95 ratios vs. Efficiency mode, vs. static priority, and vs. none, plus background work kept | H3, H4, H5 |
 | C5 | **Verified control** (every action and revert is read back from the kernel) and a methodology for checking that injected interference is real (v1 audit) | Most systems papers assume their actuators worked; `docs/AUDIT_V1.md` shows why that fails | Ledger totals in every design | n/a |
 
@@ -33,16 +33,17 @@ Scope: the paper is **Windows-only**. A Linux harness exists in the repo (`backe
 
 ## Method-level evidence already in hand (simulation, OS-independent)
 
-`python -m research.simulate_blame` drives the real decision code against a toy desktop where background load steps during the first test (300 runs per cell, culprit effect 6 WSI points, noise sd 1, innocent app ranked first):
+`python -m research.simulate_blame` drives the real decision code against a toy desktop where background load steps during the first test. Settings: 300 runs per cell, culprit effect 6 WSI points, noise sd 1, innocent app ranked first, 90 control periods for both methods.
 
-| Load drift during test | One-at-a-time: innocent blamed | Factorial: innocent blamed | Factorial: culprit missed |
+| Load drift during test | One-at-a-time: innocent blamed | Randomized sequential factorial: innocent blamed | Factorial: culprit missed |
 |---:|---:|---:|---:|
-| -8 | 51.7% | 2.3% | 49.7% |
-| -4 | 25.0% | 2.3% | 0.7% |
-| 0 | 0.0% | 4.3% | 0.0% |
-| +4 | 0.0% (culprit missed 46%) | 4.3% | 0.0% |
+| -8 | 51.7% | 2.0% | 3.3% |
+| -6 | 44.7% | 2.0% | 0.7% |
+| -4 | 33.7% | 3.3% | 0.0% |
+| 0 | 0.0% | 3.7% | 0.0% |
+| +4 | 0.0% | 3.0% | 0.0% |
 
-Randomization holds false blame at about the test's 5% level whatever the drift. Sequential testing does not. The price is power: under very large drops, the factorial design misses the culprit more often and retries it later. Report both sides.
+Randomization holds false blame near the test's 5% level whatever the drift. Sequential testing does not. Adding sequential rounds (up to 3 pooled rounds, α split across looks) removed the earlier loss of power: misses under the largest drop fell from 49.7% (single round) to 3.3%. The one remaining cost is time, since an inconclusive suspect needs about 5 s per extra round.
 
 ## Threats to validity (write these into the paper)
 

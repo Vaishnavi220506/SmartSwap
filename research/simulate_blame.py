@@ -28,7 +28,7 @@ from backend.blame import FactorialInterrogator, Interrogator, Suspect
 CULPRIT, INNOCENT = 1, 2
 
 
-def run_once(kind: str, drift: float, effect: float, noise: float, seed: int, periods: int = 60) -> tuple[bool, bool]:
+def run_once(kind: str, drift: float, effect: float, noise: float, seed: int, periods: int = 90) -> tuple[bool, bool]:
     rng = random.Random(seed)
     it = FactorialInterrogator(seed=seed) if kind == "factorial" else Interrogator("interventional")
     ranked = [Suspect(INNOCENT, "innocent", [INNOCENT], 0.9, 0.9, 0.0, 1.0, 1.0, False), Suspect(CULPRIT, "culprit", [CULPRIT], 0.5, 0.5, 0.0, 1.0, 1.0, False)]
