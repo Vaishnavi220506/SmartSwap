@@ -53,6 +53,7 @@ DATA = Path(os.environ.get("SS_DATA", Path.home() / ".smartswap"))
 PRESETS = {"idle": [], "cpu": [("cpu", 2 * N)], "membw": [("membw", max(2, N // 2))], "io": [("io", 16)],
            "mixed": [("cpu", N), ("membw", max(1, N // 4)), ("io", 4)]}
 BLAME_MODES = ["none", "oracle", *MODES]
+TRADEOFF_POLICIES = ["none", "nice_all", "adaptive_all", "causalshield"]  # lower everyone / global ladder / blame-then-minimal-fix
 FG_BLAME_S = 24.0
 
 
@@ -60,6 +61,7 @@ def cells(design: str) -> list[tuple[str, str]]:
     if design == "validity": return [(p, q) for p in PRESETS for q in ("none", "observe")]
     if design == "mitigation": return [(p, q) for p in ("cpu", "membw", "io", "mixed") for q in ("none", "nice", "adaptive")]
     if design == "blame": return [(s, m) for s in scenarios() for m in BLAME_MODES]
+    if design == "tradeoff": return [(s, m) for s in scenarios() for m in TRADEOFF_POLICIES]
     raise ValueError(design)
 
 
@@ -169,9 +171,9 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
     bg, probe = data_files(); t0 = time.time(); ledger = Ledger(t0); errors: list[str] = []
     stop_file = DATA / f"stop-{os.getpid()}-{int(t0 * 1e6)}"; stop = threading.Event()
     canary = fg = None; rows: list[dict[str, float]] = []; workers: list[tuple[str, subprocess.Popen]] = []; apps: list[dict[str, Any]] = []
-    cfg = ControllerConfig(act=(policy == "adaptive"), fingerprints=fingerprints); controller = Controller(cal, float(CANARY_ENV["SS_INTERVAL"]) * 1000, cfg)
+    cfg = ControllerConfig(act=(policy in ("adaptive", "adaptive_all")), fingerprints=fingerprints); controller = Controller(cal, float(CANARY_ENV["SS_INTERVAL"]) * 1000, cfg)
     actuator: Actuator | None = None; interrogator = None; blamer = None; events: list[dict[str, Any]] = []; ctl = None; fg_out: dict[str, Any] = {}; overhead = 0.0
-    blame = design == "blame"; use_canary = blame or policy in ("observe", "adaptive") or design == "validity"
+    blame = design in ("blame", "tradeoff"); shield = None; app_act: dict[int, Actuator] = {}; ops_log: list[dict[str, Any]] = []; use_canary = blame or policy in ("observe", "adaptive") or design == "validity"
     try:
         if use_canary:
             canary = spawn(posix.PROBE, {**CANARY_ENV, "SS_IO_FILE": str(probe), "SS_SEED": str(seed + 101)})
@@ -192,11 +194,18 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
                 if p.stdout.readline().strip() != "READY": raise RuntimeError(f"{role} worker failed: " + p.stderr.read()[-300:])
         t_ready = time.time(); pids = [p.pid for _, p in workers] + [a["proc"].pid for a in apps]
         if pids: actuator = Actuator(pids, ledger, f"smartswap-{os.getpid()}-{int(t0 * 1000)}")
-        if policy == "nice" and actuator: actuator.hint("priority", "static policy"); actuator.hint("io_priority", "static policy")
+        if policy in ("nice", "nice_all") and actuator: actuator.hint("priority", "static policy"); actuator.hint("io_priority", "static policy")
         culprit_root = apps[0]["proc"].pid if apps else None
         if blame:
             mine = {os.getpid()} | set(pids)
             blamer = Blamer(CONTROL_PERIOD_S, engage_wsi=cfg.engage_wsi, stop_pids=frozenset({os.getpid()}), exclude_pids=frozenset({canary.pid}))
+            if policy == "causalshield":
+                from backend.blame import FactorialInterrogator
+                from backend.remedy import Optimizer
+                from backend.shield import Shield, ladder_for
+                shield = Shield(blamer, FactorialInterrogator(slo_wsi=cfg.slo_wsi, seed=seed), Optimizer(slo_wsi=cfg.slo_wsi, ladder=ladder_for("linux")))
+                interrogator = shield.interrogator
+                app_act = {a["proc"].pid: Actuator([a["proc"].pid], ledger, f"smartswap-{os.getpid()}-{int(t0 * 1000)}-{a['proc'].pid}") for a in apps}
             if policy in MODES: interrogator = make_interrogator(policy, slo_wsi=cfg.slo_wsi, eval_periods=cfg.benefit_eval_periods, min_reduction=cfg.benefit_min_reduction, seed=seed)
             if policy == "oracle":
                 kind = "io_priority" if apps[0]["role"] == "io" else "priority"
@@ -223,7 +232,21 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
                     outside = {p.pid for p in snap} - tree
                     blamer.update(snap, row["wsi"], row["excess"], elapsed_s=(snap_t - last_snap) if last_snap else None); last_snap = snap_t
                     for app in list(blamer.protected): blamer.protected[app] = blamer.protected[app] or app in outside
-                    if interrogator is not None:
+                    if shield is not None:
+                        seen = len(interrogator.verdicts)
+                        for op in shield.step(controller, row["attributed"] if row["attributed"] != "none" else controller.resource, blamer.names):
+                            ops_log.append({"t_s": round(time.time() - t_ready, 3), "op": list(op)})
+                            if op[0] == "hint" and op[1] in app_act: (app_act[op[1]].hint if op[3] else app_act[op[1]].revert)(op[2], "blame micro-experiment")
+                            elif op[0] == "level" and op[1] in app_act:
+                                act = app_act[op[1]]
+                                if op[2].startswith("cap"): act.set_cap(float(op[2][3:]), "minimum intervention")
+                                else: act.clear_cap("minimum intervention: " + op[2])
+                            elif op[0] == "clear" and op[1] in app_act: app_act[op[1]].clear_cap("culprit released")
+                            elif op[0] == "fallback": (actuator.hint if op[1] else actuator.revert)("priority", "uncertainty fallback")
+                            if op[0] == "hint" and op[3]: events.append({"t_s": round(time.time() - t_ready, 3), "app": op[1], "label": label_of.get(op[1], "?"), "kind": "nudge", "correct": op[1] == culprit_root})
+                        for v in interrogator.verdicts[seen:]:
+                            events.append({"t_s": round(time.time() - t_ready, 3), "app": v["app"], "label": label_of.get(v["app"], "?"), "kind": "confirm" if v["verdict"] == "confirmed" else "exonerate", "correct": v["app"] == culprit_root})
+                    elif interrogator is not None:
                         ranked = blamer.top_cpu() if policy == "top_cpu" else blamer.rank(row["attributed"] if row["attributed"] != "none" else controller.resource)
                         seen = len(interrogator.verdicts)
                         for d in interrogator.step(controller.engaged, controller.resource, controller.wsi_history, ranked, blamer.names):
@@ -249,12 +272,13 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
     finally:
         stop.set()
         if ctl: ctl.join(timeout=3)
+        for act in app_act.values(): act.revert_all()
         if actuator: actuator.revert_all()
         stop_file.touch()
         outs = []
-        for p in [p for _, p in workers] + [a["proc"] for a in apps]:
+        for label, p in [(r, p) for r, p in workers] + [(a["label"], a["proc"]) for a in apps]:
             try:
-                o, _ = p.communicate(timeout=30); outs.append(json.loads(o.strip().splitlines()[-1]))
+                o, _ = p.communicate(timeout=30); outs.append(json.loads(o.strip().splitlines()[-1]) | {"label": label})
             except Exception as exc: errors.append(f"worker: {type(exc).__name__}: {exc}")
             reap(p)
         reap(canary); reap(fg); stop_file.unlink(missing_ok=True)
@@ -262,7 +286,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
     if win[0] and win[1]:
         for o in outs:
             n = sum(v for b, v in o.get("buckets", {}).items() if int(win[0] * 10) <= int(b) < int(win[1] * 10))
-            tput[o["role"]] = tput.get(o["role"], 0) + n / (win[1] - win[0])
+            tput[o["role"]] = tput.get(o["role"], 0) + n / (win[1] - win[0]); o["units_per_s"] = n / (win[1] - win[0])
     acts = [e for e in ledger.entries if not e["kind"].endswith("_revert")]; reverts = [e for e in ledger.entries if e["kind"].endswith("_revert")]
     nudges = blames(events, policy)
     result = {"preset": preset, "policy": policy, "seed": seed, "started_at": t0, "errors": errors,
@@ -273,6 +297,8 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
               "controller_engaged_share": round(sum(1 for s in controller.trace if s["engaged"]) / len(controller.trace), 3) if controller.trace else None,
               "fingerprints": fingerprints, "time_to_first_action_s": None, "control_cpu_share": round(overhead / max(1e-3, time.time() - t0), 5)}
     if blame:
+        result["app_units_per_s"] = {o["label"]: round(o.get("units_per_s", 0.0), 3) for o in outs if "label" in o}
+        if shield is not None: result["shield"] = shield.summary() | {"ops": ops_log}
         result.update(scenario=preset, mode=policy, culprit=apps[0]["label"] if apps else None, events=events,
                       apps=[{k: v for k, v in a.items() if k != "proc"} | {"pid": a["proc"].pid} for a in apps],
                       verdicts=[v | {"correct": v["app"] == (apps[0]["proc"].pid if apps else None)} for v in (interrogator.verdicts if interrogator else [])],
@@ -285,7 +311,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
 def blames(events: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
     """The applications a mode actually blamed, in order: a confirmation for the experimental
     modes (their test nudges are probes, not verdicts), every kept nudge for the heuristics."""
-    return [e for e in events if e["kind"] == ("confirm" if mode in ("interventional", "factorial") else "nudge")]
+    return [e for e in events if e["kind"] == ("confirm" if mode in ("interventional", "factorial", "causalshield") else "nudge")]
 
 
 def _descends(pid: int, roots: set[int]) -> bool:
@@ -394,6 +420,9 @@ def analyse(study: Path, out: Path) -> Path:
     if design == "validity":
         from research.designs import score_attribution
         s = analyse_validity(study); s["attribution_rule_vs_fingerprint"] = score_attribution(study); (out / "summary.json").write_text(json.dumps(s, indent=2, default=float)); write_validity(s, out)
+    elif design == "tradeoff":
+        from research.designs import analyse_tradeoff
+        analyse_tradeoff(study, out)
     elif design == "blame":
         from research.designs import analyse_blame
         analyse_blame(study, out)
@@ -406,7 +435,7 @@ def analyse(study: Path, out: Path) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter); sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run"); r.add_argument("--design", choices=["validity", "mitigation", "blame"], required=True); r.add_argument("--blocks", type=int, default=8)
+    r = sub.add_parser("run"); r.add_argument("--design", choices=["validity", "mitigation", "blame", "tradeoff"], required=True); r.add_argument("--blocks", type=int, default=8)
     r.add_argument("--seed", type=int, default=20261013); r.add_argument("--study-id"); r.add_argument("--out", type=Path, default=DATA / "results")
     r.add_argument("--fingerprint", action="store_true", help="learn contention fingerprints per block and attribute with them")
     a = sub.add_parser("analyze"); a.add_argument("study", type=Path); a.add_argument("--out", type=Path)

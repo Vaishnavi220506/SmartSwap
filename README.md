@@ -1,6 +1,8 @@
-# SmartSwap
+# CausalShield (built on SmartSwap)
 
-**Measuring and mitigating background interference on unmodified Windows desktops with a user-mode stall index.**
+**Which background job is actually slowing my application, how can we prove it, and what is the smallest intervention that fixes it?** All on unmodified Windows, without admin rights.
+
+CausalShield blames background jobs *by experiment*: randomized, reversible micro-interventions measure each suspect's causal effect on a user-mode stall index. Only the confirmed culprit is then throttled, as little as needed, and innocent background work is left alone. SmartSwap, described below, is its sensing and actuation layer. The research plan is in `docs/PAPER_PLAN.md`; the go/no-go experiment is `--design tradeoff`.
 
 Background work (sync clients, indexers, updates, builds) slows down the app you are using, but Windows only tells software how *busy* the machine is, not how much time interactive work is *losing*. SmartSwap:
 

@@ -77,3 +77,23 @@ def test_design_analysis_and_multi_host_pooling(tmp_path: Path) -> None:
     assert rows["H1"]["a_only"] == 18 and rows["H1"]["supported"]
     assert rows["H3"]["hosts"] == 3 and rows["H3"]["median_ratio"] < 1 and rows["H3"]["supported"]
     assert rows["H4"]["p"] == 1.0 and not rows["H4"]["supported"]  # no real-tool study supplied
+
+
+def test_tradeoff_analysis_and_go_no_go_hypotheses(tmp_path: Path) -> None:
+    rng = random.Random(9); dirs = []
+    apps = [{"label": "culprit", "culprit": True}, {"label": "innocent1", "culprit": False}, {"label": "innocent2", "culprit": False}]
+    for host in ("hostA", "hostB", "hostC"):
+        trials = []
+        for b in range(6):
+            base = 20 + rng.random()
+            # lowering everyone protects the foreground but slows the innocents; CausalShield slows only the culprit
+            for pol, p95, inn, cul in (("none", base, 100, 100), ("nice_all", base * 0.5, 70, 60), ("adaptive_all", base * 0.45, 40, 30), ("causalshield", base * 0.52, 98, 50)):
+                trials.append(_trial("cpu", pol, b, p95, scenario="cpu", mode=pol, apps=apps,
+                                     app_units_per_s={"culprit": cul, "innocent1": inn, "innocent2": inn}, first_nudge_correct=None, wrong_nudges=0, time_to_correct_nudge_s=None))
+        dirs.append(_study(tmp_path, f"tradeoff-{host}", "tradeoff", host, trials))
+    s = analyse_design("tradeoff", dirs[0], tmp_path / "out-tradeoff")
+    assert abs(s["cells"]["cpu/causalshield"]["innocent_kept_median"] - 0.98) < 1e-9 and abs(s["cells"]["cpu/nice_all"]["innocent_kept_median"] - 0.7) < 1e-9
+    hyp = json.loads((Path(__file__).resolve().parents[1] / "research" / "hypotheses.json").read_text(encoding="utf-8"))
+    rows = {r["id"]: r for r in evaluate(load_studies(dirs), hyp)}
+    assert rows["H6"]["blocks"] == 18 and abs(rows["H6"]["median_diff"] - 0.28) < 1e-9 and rows["H6"]["supported"]
+    assert rows["H7"]["median_ratio"] < 1.10 and rows["H7"]["supported"]  # 1.04 x: within the 10% margin

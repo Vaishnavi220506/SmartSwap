@@ -32,6 +32,7 @@ COMPARISONS = {
 def analyse_design(design: str, study: Path, out: Path) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
     if design == "attribution": return analyse_attribution(study, out)
+    if design == "tradeoff": return analyse_tradeoff(study, out)
     return analyse_blame(study, out) if design == "blame" else analyse_policies(design, study, out)
 
 
@@ -201,3 +202,59 @@ def _blame_figure(cells: dict[str, Any], scenarios: list[str], modes: list[str],
     ax.set_xticks(range(len(scenarios))); ax.set_xticklabels([s.replace("_", " ") for s in scenarios], fontsize=7); ax.set_ylim(0, 105); ax.set_ylabel("First nudge = culprit (%)", fontsize=7)
     ax.legend(fontsize=6.5, ncol=4, loc="upper center", bbox_to_anchor=(0.5, 1.22)); fig.tight_layout()
     fig.savefig(out / "fig_blame_precision.pdf"); fig.savefig(out / "fig_blame_precision.png"); plt.close(fig)
+
+
+TRADEOFF_NAMES = {"none": "None", "nice_all": "Lower every job (static priority)", "ecoqos_all": "Efficiency mode on every job",
+                  "adaptive_all": "SmartSwap v2 ladder on every job", "causalshield": "CausalShield (blame, then minimal fix)"}
+
+
+def kept(t: dict[str, Any], ref: dict[str, Any], labels: list[str]) -> float | None:
+    """Mean share of each named job's work kept vs. the unmitigated run of the same block."""
+    a, b = t.get("app_units_per_s") or {}, ref.get("app_units_per_s") or {}
+    ratios = [a.get(l, 0.0) / b[l] for l in labels if b.get(l)]
+    return statistics.fmean(ratios) if ratios else None
+
+
+def analyse_tradeoff(study: Path, out: Path) -> dict[str, Any]:
+    """Go/no-go: does blaming first protect the foreground as well as lowering everyone, while keeping innocent work?"""
+    from backend.stats import bootstrap_median_ci, wilcoxon_signed_rank
+    manifest, trials = load(study)
+    for t in trials: t.setdefault("preset", t.get("scenario")); t.setdefault("policy", t.get("mode"))
+    idx = index(trials); out.mkdir(parents=True, exist_ok=True)
+    scenarios = sorted({p for p, _ in idx}); policies = [q for q in TRADEOFF_NAMES if any(qq == q for _, qq in idx)]
+    cells, family = {}, []
+    for s in scenarios:
+        ref = idx[(s, "none")]
+        for q in policies:
+            by = idx[(s, q)]; blocks = sorted(set(by) & set(ref))
+            if not blocks: continue
+            apps = by[blocks[0]].get("apps") or []; culprit = [a["label"] for a in apps if a["culprit"]]; innocent = [a["label"] for a in apps if not a["culprit"]]
+            ik = [kept(by[b], ref[b], innocent) for b in blocks]; ck = [kept(by[b], ref[b], culprit) for b in blocks]
+            ratio = [by[b]["foreground"]["p95_ms"] / ref[b]["foreground"]["p95_ms"] for b in blocks]
+            cells[f"{s}/{q}"] = {"n": len(blocks), "p95_ratio_median": statistics.median(ratio), "innocent_kept_median": statistics.median([x for x in ik if x is not None] or [float("nan")]),
+                                 "culprit_kept_median": statistics.median([x for x in ck if x is not None] or [float("nan")])}
+        for base in ("nice_all", "adaptive_all", "ecoqos_all"):
+            if not idx[(s, "causalshield")] or not idx[(s, base)]: continue
+            blocks = sorted(set(idx[(s, "causalshield")]) & set(idx[(s, base)]) & set(ref))
+            if len(blocks) < 3: continue
+            innocent = [a["label"] for a in idx[(s, "causalshield")][blocks[0]].get("apps", []) if not a["culprit"]]
+            d_keep = [(kept(idx[(s, "causalshield")][b], ref[b], innocent) or 0) - (kept(idx[(s, base)][b], ref[b], innocent) or 0) for b in blocks]
+            family.append({"scenario": s, "vs": base, "metric": "innocent work kept (difference)", "n": len(blocks), "median": statistics.median(d_keep), "ci": bootstrap_median_ci(d_keep), "p": wilcoxon_signed_rank(d_keep)})
+            c = compare(idx, s, "causalshield", base)
+            if c: family.append({"scenario": s, "vs": base, "metric": "foreground p95 (ratio)", "n": c["n"], "median": c["median_ratio"], "ci": (c["ci_low"], c["ci_high"]), "p": c["p"]})
+    for c, padj in zip(family, holm([c["p"] for c in family])): c["p_holm"] = padj
+    summary = {"study_id": manifest["study_id"], "design": "tradeoff", "host": manifest["host"], "trials": len(trials), "trials_with_errors": sum(1 for t in trials if t["errors"]),
+               "cells": cells, "tests": family,
+               "remedy_knowledge": [t["shield"]["knowledge"] for t in trials if t.get("shield")][-1:] or None,
+               "fallback_episodes": sum(t["shield"]["fallback_episodes"] for t in trials if t.get("shield"))}
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float), encoding="utf-8")
+    f = lambda v: "-" if v is None or v != v else f"{v:.2f}"
+    L = [f"# Trade-off study {summary['study_id']}: protect the foreground, keep innocent work", "", f"Host: {manifest['host'].get('cpu')}. Trials: {summary['trials']} ({summary['trials_with_errors']} with errors).", "",
+         "| Scenario | Policy | n | p95 vs none | innocent work kept | culprit work kept |", "|---|---|---:|---:|---:|---:|"]
+    for key, c in cells.items():
+        s, q = key.split("/"); L.append(f"| {s} | {TRADEOFF_NAMES[q]} | {c['n']} | {f(c['p95_ratio_median'])} | {f(c['innocent_kept_median'])} | {f(c['culprit_kept_median'])} |")
+    L += ["", "## CausalShield vs. each blanket policy (paired by block, Holm-adjusted)", "", "| Scenario | vs | metric | median [95% CI] | p (Holm) |", "|---|---|---|---|---:|"]
+    L += [f"| {c['scenario']} | {TRADEOFF_NAMES[c['vs']]} | {c['metric']} | {f(c['median'])} [{f(c['ci'][0])}, {f(c['ci'][1])}] | {_p(c['p_holm'])} |" for c in family]
+    L += ["", f"Uncertainty fallbacks taken: {summary['fallback_episodes']}."]
+    (out / "RESULTS.md").write_text("\n".join(L) + "\n", encoding="utf-8")
+    return summary

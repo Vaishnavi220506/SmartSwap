@@ -55,7 +55,7 @@ REAL_POLICIES = ["none", "observe", "nice", "ecoqos", "adaptive", "adaptive_eco"
 REALAPP_PRESETS = ["idle", "cpu", "membw", "io", "mixed"]
 REALAPP_POLICIES = ["none", "observe", "nice", "adaptive"]
 BLAME_MODES = ["none", "oracle", "top_cpu", "passive", "interventional"]
-DESIGNS = ["main", "slo-sweep", "hybrid", "ecoqos", "real", "realapp", "blame", "attribution"]
+DESIGNS = ["main", "slo-sweep", "hybrid", "ecoqos", "real", "realapp", "blame", "attribution", "tradeoff"]
 
 
 def cells(design: str = "main") -> list[tuple[str, str]]:
@@ -67,6 +67,9 @@ def cells(design: str = "main") -> list[tuple[str, str]]:
         return [("idle", "none"), ("idle", "observe")] + [(preset, policy) for preset in REAL_PRESETS for policy in REAL_POLICIES]
     if design == "realapp":  # foreground is a real, unmodified application's UI thread
         return [(preset, policy) for preset in REALAPP_PRESETS for policy in REALAPP_POLICIES]
+    if design == "tradeoff":  # go/no-go: blanket policies vs. CausalShield on the same culprit + innocent jobs
+        from backend.govern import TRADEOFF_POLICIES, scenarios
+        return [(scenario, policy) for scenario in scenarios() for policy in TRADEOFF_POLICIES]
     if design == "blame":  # culprit identification among every process on the desktop
         from backend.govern import scenarios
         return [(scenario, mode) for scenario in scenarios() for mode in BLAME_MODES]
@@ -134,14 +137,14 @@ def main() -> None:
         if all((block, p, q) in finished for p, q in order): continue
         time.sleep(3)
         cal = calibrate_canary()
-        fps = learn_fingerprints(cal) if args.fingerprint or args.design == "attribution" else None
+        fps = learn_fingerprints(cal) if args.fingerprint or args.design in ("attribution", "tradeoff") else None
         if fps: print(f"block {block} fingerprints: {fps}", flush=True)
         for position, (preset, policy) in enumerate(order):
             if (block, preset, policy) in finished: continue
             host_load = psutil.cpu_percent(interval=1.0)  # covariate: non-study load just before the trial
-            if args.design == "blame":
+            if args.design in ("blame", "tradeoff"):
                 from backend.govern import run_blame_trial
-                result = run_blame_trial(preset, policy, cal, seed=block * 100 + position)
+                result = run_blame_trial(preset, policy, cal, seed=block * 100 + position, fingerprints=fps)
                 result.update(preset=preset, policy=policy, background_units_per_s={})
             else:
                 result = run_trial(preset, policy, cal, seed=block * 100 + position, foreground=foreground, fingerprints=fps)

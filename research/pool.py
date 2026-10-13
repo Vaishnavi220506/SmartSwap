@@ -90,11 +90,47 @@ def pooled_spearman(studies: list[dict[str, Any]], design: str, policy: str) -> 
     return {"n": len(pts), "rho": rho, "p": p / 2 if rho > 0 else 1 - p / 2}  # one-sided: positive association
 
 
+def pooled_innocent_kept(studies: list[dict[str, Any]], a: str, b: str) -> dict[str, Any]:
+    """Paired difference in innocent work kept (A - B, vs. the same block's unmitigated run), blocks nested in hosts."""
+    from research.designs import kept
+    by_host: dict[str, list[float]] = defaultdict(list)
+    for s in studies:
+        if s["design"] != "tradeoff": continue
+        for (sc, pol), by in s["idx"].items():
+            if pol != a: continue
+            other, ref = s["idx"].get((sc, b), {}), s["idx"].get((sc, "none"), {})
+            for blk in set(by) & set(other) & set(ref):
+                innocent = [x["label"] for x in by[blk].get("apps", []) if not x["culprit"]]
+                ka, kb = kept(by[blk], ref[blk], innocent), kept(other[blk], ref[blk], innocent)
+                if ka is not None and kb is not None: by_host[s["host"]].append(ka - kb)
+    diffs = [v for g in by_host.values() for v in g]
+    if not diffs: return {"p": 1.0, "missing": True}
+    med, lo, hi = hierarchical_bootstrap_median(list(by_host.values()))
+    p = wilcoxon_signed_rank(diffs); p = p / 2 if statistics.median(diffs) > 0 else 1 - p / 2
+    return {"hosts": len(by_host), "blocks": len(diffs), "median_diff": med, "ci_low": lo, "ci_high": hi, "p": p}
+
+
+def pooled_noninferior(studies: list[dict[str, Any]], a: str, b: str, margin: float) -> dict[str, Any]:
+    """One-sided test that p95(A)/p95(B) < margin, on log ratios shifted by log(margin)."""
+    by_host: dict[str, list[float]] = defaultdict(list)
+    for s in studies:
+        if s["design"] != "tradeoff": continue
+        for sc in {p for p, _ in s["idx"]}: by_host[s["host"]] += block_ratios(s["idx"], sc, a, b)
+    logs = [math.log(r) for g in by_host.values() for r in g]
+    if not logs: return {"p": 1.0, "missing": True}
+    shifted = [x - math.log(margin) for x in logs]; p = wilcoxon_signed_rank(shifted)
+    p = p / 2 if statistics.median(shifted) < 0 else 1 - p / 2
+    med, lo, hi = hierarchical_bootstrap_median([[math.log(r) for r in g] for g in by_host.values() if g])
+    return {"hosts": len(by_host), "blocks": len(logs), "median_ratio": math.exp(med), "ci_low": math.exp(lo), "ci_high": math.exp(hi), "margin": margin, "p": p}
+
+
 def evaluate(studies: list[dict[str, Any]], hypotheses: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for h in hypotheses["hypotheses"]:
         if h["test"] == "mcnemar_first_nudge": r = pooled_mcnemar(studies, h["a"], h["b"], h.get("scenario", "*"))
         elif h["test"] == "spearman_wsi_p95": r = pooled_spearman(studies, h["design"], h["policy"])
+        elif h["test"] == "innocent_kept": r = pooled_innocent_kept(studies, h["a"], h["b"])
+        elif h["test"] == "noninferior_p95": r = pooled_noninferior(studies, h["a"], h["b"], h["margin"])
         else: r = pooled_ratio(studies, h["design"], h["preset"], h["a"], h["b"], h.get("direction", "two-sided")) or {"p": 1.0, "missing": True}
         rows.append({**h, **r})
     for r, padj in zip(rows, holm([r["p"] for r in rows])): r["p_holm"] = padj; r["supported"] = padj < hypotheses.get("alpha", 0.05)
@@ -122,6 +158,8 @@ def main() -> None:
         if r["test"] == "mcnemar_first_nudge": ev = f"{r['a_only']} vs {r['b_only']} discordant of {r['pairs']} pairs, {r['hosts']} hosts"
         elif r["test"] == "spearman_wsi_p95": ev = f"rho {r['rho']:.2f}, n={r['n']}" if r["rho"] is not None else "no data"
         elif r.get("missing"): ev = "no data"
+        elif r["test"] == "innocent_kept": ev = f"innocent work kept +{100 * r['median_diff']:.0f} pts [{100 * r['ci_low']:.0f}, {100 * r['ci_high']:.0f}], {r['blocks']} blocks, {r['hosts']} hosts"
+        elif r["test"] == "noninferior_p95": ev = f"p95 ratio {r['median_ratio']:.2f} [{r['ci_low']:.2f}, {r['ci_high']:.2f}] vs margin {r['margin']:.2f}, {r['blocks']} blocks"
         else: ev = f"ratio {r['median_ratio']:.2f} [{r['ci_low']:.2f}, {r['ci_high']:.2f}], {r['hosts_a_better']}/{r['hosts']} hosts better, {r['blocks']} blocks"
         L.append(f"| {r['id']} | {r['claim']} | {ev} | {r['p_holm']:.4f} | {'yes' if r['supported'] else 'no'} |")
     if secondary:

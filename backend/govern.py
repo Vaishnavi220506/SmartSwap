@@ -158,19 +158,24 @@ def scenarios() -> dict[str, dict[str, Any]]:
 
 
 BLAME_MODES = ("none", "oracle", *MODES)
+# Go/no-go comparison: blanket policies on every managed job vs. CausalShield (blame, then the minimal fix on the culprit only).
+TRADEOFF_POLICIES = ("none", "nice_all", "ecoqos_all", "adaptive_all", "causalshield")
 BLAME_FG_DURATION_S = 24.0  # long enough for up to 3 randomized rounds (about 5 s each) in every mode
 
 
-def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: int = 0, cancel: threading.Event | None = None) -> dict[str, Any]:
+def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: int = 0, cancel: threading.Event | None = None, fingerprints: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A blame trial (`mode` in BLAME_MODES) or a trade-off trial (`mode` in TRADEOFF_POLICIES)."""
+    from .engine import Actuator
     spec = scenarios().get(scenario)
     if spec is None: raise ValueError(f"unknown scenario {scenario}")
-    if mode not in BLAME_MODES: raise ValueError(f"unknown blame mode {mode}")
+    if mode not in BLAME_MODES and mode not in TRADEOFF_POLICIES: raise ValueError(f"unknown blame mode {mode}")
     bg_file, probe_file = ensure_data_files(DATA_DIR)
     t0 = time.time(); ledger = Ledger(t0); errors: list[str] = []; stop = threading.Event()
     stop_event = native.StopEvent(rf"Local\SmartSwapBlame-{os.getpid()}-{int(t0 * 1e6)}")
     apps: list[dict[str, Any]] = []; canary = fg = None; canary_rows: list[dict[str, float]] = []; ctl_thread = None
-    controller = Controller(calibration, float(CANARY_ENV["SS_INTERVAL"]) * 1000, ControllerConfig(act=False))
+    controller = Controller(calibration, float(CANARY_ENV["SS_INTERVAL"]) * 1000, ControllerConfig(act=(mode == "adaptive_all"), fingerprints=fingerprints))
     governor = ExternalGovernor(ledger, journal=None); blamer = interrogator = None
+    group: Actuator | None = None; app_act: dict[int, Actuator] = {}; shield = None; ops_log: list[dict[str, Any]] = []; app_out: dict[str, Any] = {}
     fg_out: dict[str, Any] = {}; events: list[dict[str, Any]] = []; overhead_s = 0.0
     try:
         canary = _spawn(PROBE, _env({**CANARY_ENV, "SS_IO_FILE": str(probe_file), "SS_SEED": str(seed + 101)}))
@@ -186,6 +191,18 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         t_ready = time.time()
         culprit_root = apps[0]["proc"].pid
         blamer = Blamer(CONTROL_PERIOD_S, engage_wsi=controller.cfg.engage_wsi, stop_pids=frozenset({os.getpid()}), exclude_pids=frozenset({canary.pid}))
+        name = f"SmartSwap-{os.getpid()}-{int(t0 * 1000)}"
+        group = Actuator([a["proc"].pid for a in apps], ledger, name, track_children=True); group.refresh()
+        if mode == "nice_all": group.cpu_hint("static policy"); group.io_hint("static policy")
+        if mode == "ecoqos_all": group.eco_hint("Efficiency mode"); group.cpu_hint("Efficiency mode")
+        if mode == "causalshield":
+            from .blame import FactorialInterrogator
+            from .remedy import Optimizer
+            from .shield import Shield, ladder_for
+            shield = Shield(blamer, FactorialInterrogator(slo_wsi=controller.cfg.slo_wsi, seed=seed), Optimizer(slo_wsi=controller.cfg.slo_wsi, ladder=ladder_for("windows")))
+            interrogator = shield.interrogator
+            for a in apps:
+                app_act[a["proc"].pid] = Actuator([a["proc"].pid], ledger, f"{name}-{a['proc'].pid}", track_children=True); app_act[a["proc"].pid].refresh()
         if mode in MODES: interrogator = make_interrogator(mode, slo_wsi=controller.cfg.slo_wsi, eval_periods=controller.cfg.benefit_eval_periods, min_reduction=controller.cfg.benefit_min_reduction, seed=seed)
         if mode == "oracle":
             members = [culprit_root] + [c.pid for c in psutil.Process(culprit_root).children(recursive=True)]
@@ -198,12 +215,38 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
             label_of = {a["proc"].pid: a["label"] for a in apps}; last_snap = None; tick_n = 0
             while not stop.wait(CONTROL_PERIOD_S):
                 tick = time.process_time()
-                controller.step((time.time() - t0) * 1000, canary_rows[-controller.cfg.window_beats:], None)
+                for d in controller.step((time.time() - t0) * 1000, canary_rows[-controller.cfg.window_beats:], None):
+                    group.refresh(); group.apply(d)  # adaptive_all: the v2 ladder on every managed job
                 row = controller.trace[-1]
                 tick_n += 1
                 if controller.engaged or tick_n % CALM_SNAPSHOT_EVERY == 0:  # full rate only while a stall is engaged
                     snap_t = time.time(); blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid(), elapsed_s=(snap_t - last_snap) if last_snap else None); last_snap = snap_t
-                if interrogator is not None:
+                if shield is not None:
+                    seen = len(interrogator.verdicts)
+                    for op in shield.step(controller, row["attributed"] if row["attributed"] != "none" else controller.resource, blamer.names):
+                        ops_log.append({"t_s": round(time.time() - t_ready, 3), "op": list(op)}); act = app_act.get(op[1]) if op[0] != "fallback" else None
+                        if op[0] == "hint" and act:
+                            act.refresh()
+                            if op[3]: (act.cpu_hint if op[2] == "priority" else act.io_hint)("blame micro-experiment")
+                            else: act.revert_hint(op[2], "blame micro-experiment")
+                            if op[3]: events.append({"t_s": round(time.time() - t_ready, 3), "app": op[1], "label": label_of.get(op[1], "?"), "kind": "nudge", "correct": op[1] == culprit_root})
+                        elif op[0] == "level" and act:
+                            act.refresh()
+                            if op[2] == "priority":
+                                act.clear_cap("minimum intervention: priority")
+                                if "eco" in act.active: act.revert_hint("eco", "minimum intervention: priority")
+                            else:
+                                if "eco" not in act.active: act.eco_hint("minimum intervention")
+                                if op[2].startswith("cap"): act.set_cap(float(op[2][3:]), "minimum intervention")
+                                else: act.clear_cap("minimum intervention: eco")
+                        elif op[0] == "clear" and act:
+                            act.clear_cap("culprit released")
+                            if "eco" in act.active: act.revert_hint("eco", "culprit released")
+                        elif op[0] == "fallback":
+                            group.refresh(); group.cpu_hint("uncertainty fallback") if op[1] else group.revert_hint("priority", "uncertainty fallback")
+                    for v in interrogator.verdicts[seen:]:
+                        events.append({"t_s": round(time.time() - t_ready, 3), "app": v["app"], "label": label_of.get(v["app"], "?"), "kind": "confirm" if v["verdict"] == "confirmed" else "exonerate", "correct": v["app"] == culprit_root})
+                elif interrogator is not None:
                     ranked = blamer.top_cpu() if mode == "top_cpu" else blamer.rank(row["attributed"] if row["attributed"] != "none" else controller.resource)
                     seen = len(interrogator.verdicts)
                     for d in interrogator.step(controller.engaged, controller.resource, controller.wsi_history, ranked, blamer.names):
@@ -230,15 +273,21 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         stop.set()
         if ctl_thread: ctl_thread.join(timeout=3)
         governor.release_all("end of trial")
+        for act in app_act.values(): act.revert_all(set())
+        if group: group.revert_all(set())
         stop_event.set()
         for a in apps:
-            try: a["proc"].communicate(timeout=20)
+            try: app_out[a["label"]] = json.loads(a["proc"].communicate(timeout=20)[0].strip().splitlines()[-1])
             except Exception as exc: errors.append(f"{a['label']}: {type(exc).__name__}: {exc}")
             _reap(a["proc"])
         _reap(canary); _reap(fg); stop_event.close()
 
     rows = fg_out.get("rows", [])
-    nudges = [e for e in events if e["kind"] == ("confirm" if mode in ("interventional", "factorial") else "nudge")]  # what each mode actually blamed
+    nudges = [e for e in events if e["kind"] == ("confirm" if mode in ("interventional", "factorial", "causalshield") else "nudge")]  # what each mode actually blamed
+    win = (fg_out.get("wall_start"), fg_out.get("wall_end")); app_units = {}
+    if win[0] and win[1]:
+        for label, o in app_out.items():
+            app_units[label] = round(sum(n for b, n in o.get("buckets", {}).items() if int(win[0] * 10) <= int(b) < int(win[1] * 10)) / (win[1] - win[0]), 3)
     verdicts = interrogator.verdicts if interrogator else []
     first_correct = next((e["t_s"] for e in nudges if e["correct"]), None)
     culprit_label = apps[0]["label"] if apps else None; culprit_pid = apps[0]["proc"].pid if apps else None
@@ -253,7 +302,8 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         "action_count": sum(1 for e in ledger.entries if not e["kind"].endswith("_revert")),
         "reverts_verified": all(e["verified"] for e in ledger.entries if e["kind"].endswith("_revert")) if any(e["kind"].endswith("_revert") for e in ledger.entries) else None,
         "controller_trace": controller.trace, "governor_cpu_share": round(overhead_s / max(1e-3, time.time() - t0), 5),
-        "calibration": asdict(calibration),
+        "calibration": asdict(calibration), "fingerprints": fingerprints, "app_units_per_s": app_units,
+        "shield": (shield.summary() | {"ops": ops_log}) if shield else None,
     }
 
 

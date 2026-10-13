@@ -1,11 +1,71 @@
 {
-  "_note": "Primary hypotheses, fixed BEFORE the v3 data are collected (the git commit that adds this file is the pre-registration timestamp). Holm-Bonferroni runs over these five only; every other comparison in the per-design RESULTS.md is secondary/exploratory. Ratios are policy A / policy B of foreground p95, paired by block; 'less' means A is expected to be lower.",
+  "_note": "Primary hypotheses, fixed BEFORE the v3 data are collected (the git commit that adds this file is the pre-registration timestamp). Holm-Bonferroni runs over these seven only; every other comparison in the per-design RESULTS.md is secondary/exploratory. Ratios are policy A / policy B of foreground p95, paired by block; 'less' means A is expected to be lower.",
   "alpha": 0.05,
   "hypotheses": [
-    {"id": "H1", "claim": "Randomized factorial blame names the culprit application first more often than the Task-Manager top-CPU heuristic", "design": "blame", "test": "mcnemar_first_nudge", "a": "factorial", "b": "top_cpu", "scenario": "*"},
-    {"id": "H2", "claim": "The canary's WSI tracks a real, unmodified application's UI latency", "design": "realapp", "test": "spearman_wsi_p95", "policy": "observe", "direction": "greater"},
-    {"id": "H3", "claim": "SmartSwap with the EcoQoS rung beats Windows Efficiency mode under memory-bandwidth contention", "design": "ecoqos", "test": "wilcoxon_p95", "preset": "membw", "a": "adaptive_eco", "b": "ecoqos", "direction": "less"},
-    {"id": "H4", "claim": "SmartSwap cuts tail latency when the background is real tools", "design": "real", "test": "wilcoxon_p95", "preset": "real_mixed", "a": "adaptive", "b": "none", "direction": "less"},
-    {"id": "H5", "claim": "Core-class steering beats the best static policy under memory-bandwidth contention on hybrid CPUs", "design": "hybrid", "test": "wilcoxon_p95", "preset": "membw", "a": "adaptive_hybrid", "b": "nice", "direction": "less"}
+    {
+      "id": "H1",
+      "claim": "Randomized factorial blame names the culprit application first more often than the Task-Manager top-CPU heuristic",
+      "design": "blame",
+      "test": "mcnemar_first_nudge",
+      "a": "factorial",
+      "b": "top_cpu",
+      "scenario": "*"
+    },
+    {
+      "id": "H2",
+      "claim": "The canary's WSI tracks a real, unmodified application's UI latency",
+      "design": "realapp",
+      "test": "spearman_wsi_p95",
+      "policy": "observe",
+      "direction": "greater"
+    },
+    {
+      "id": "H3",
+      "claim": "SmartSwap with the EcoQoS rung beats Windows Efficiency mode under memory-bandwidth contention",
+      "design": "ecoqos",
+      "test": "wilcoxon_p95",
+      "preset": "membw",
+      "a": "adaptive_eco",
+      "b": "ecoqos",
+      "direction": "less"
+    },
+    {
+      "id": "H4",
+      "claim": "SmartSwap cuts tail latency when the background is real tools",
+      "design": "real",
+      "test": "wilcoxon_p95",
+      "preset": "real_mixed",
+      "a": "adaptive",
+      "b": "none",
+      "direction": "less"
+    },
+    {
+      "id": "H5",
+      "claim": "Core-class steering beats the best static policy under memory-bandwidth contention on hybrid CPUs",
+      "design": "hybrid",
+      "test": "wilcoxon_p95",
+      "preset": "membw",
+      "a": "adaptive_hybrid",
+      "b": "nice",
+      "direction": "less"
+    },
+    {
+      "id": "H6",
+      "claim": "CausalShield keeps more innocent background work than lowering every job's priority",
+      "design": "tradeoff",
+      "test": "innocent_kept",
+      "a": "causalshield",
+      "b": "nice_all",
+      "direction": "greater"
+    },
+    {
+      "id": "H7",
+      "claim": "CausalShield's foreground p95 is non-inferior (within 10%) to lowering every job's priority",
+      "design": "tradeoff",
+      "test": "noninferior_p95",
+      "a": "causalshield",
+      "b": "nice_all",
+      "margin": 1.1
+    }
   ]
 }

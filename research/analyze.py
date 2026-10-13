@@ -519,7 +519,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(); ap.add_argument("study", type=Path); ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     design = json.loads((args.study / "manifest.json").read_text(encoding="utf-8")).get("design_name", "main")
-    if design in ("ecoqos", "real", "realapp", "blame", "attribution"):
+    if design in ("ecoqos", "real", "realapp", "blame", "attribution", "tradeoff"):
         from research.designs import analyse_design
         out = args.out or args.study / "analysis"; analyse_design(design, args.study, out); print(out / "RESULTS.md"); return
     if design == "hybrid":
