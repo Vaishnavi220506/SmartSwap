@@ -71,6 +71,24 @@ The redesign, **presumed guilty**, inverts the burden of proof:
 - an inconclusive job stays lowered (the safe side);
 - every managed job is a candidate, so a mislabelled stall can no longer hide the culprit.
 
+### Third iteration: label-free presumed guilty is the first GO signal (internal check, 4 blocks, not paper evidence)
+
+The second run of presumed guilty still failed. Its logs showed the CPU culprit was almost never tested: candidates had to use the *labelled* resource, and on that VM CPU stalls were labelled "storage". The fix is **label-free blame**:
+- lower both CPU and I/O priority;
+- consider every active managed job;
+- let the randomized release test establish causation.
+
+| Scenario | p95 after verdicts (CausalShield ÷ lower everyone) | Innocent work kept (difference) |
+|---|---:|---:|
+| CPU | 1.07 [1.00, 1.36] | +0.39 [0.30, 0.43] |
+| Storage vs. CPU | 0.91 [0.77, 1.04] | +0.05 |
+| Phased culprit | 1.00 [0.91, 1.34] | +0.19 [0.04, 0.25] |
+| Polite hog | 1.17 [0.52, 1.71] | +0.14 |
+
+- Culprits were never cleared: 11 confirmed, 4 held. All 11 confirmations hit the real culprit.
+- Open problems: (1) time to the last verdict is about 18 s, so whole-window p95 is still 1.25–1.86× worse than lowering everyone; (2) innocent jobs that stay inconclusive are held lowered (11 cases).
+- 4 blocks are underpowered (Holm p = 1.0 everywhere). The Windows `tradeoff` study, with 10 blocks on 3+ hosts, is the real test of H6 and H7.
+
 ## Protocol
 
 1. Commit `research/hypotheses.json` **before** collecting v3 data. That commit is the pre-registration.
