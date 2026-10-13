@@ -126,6 +126,7 @@ def main() -> None:
     ap.add_argument("--settle", type=float, default=0.5, help="extra idle seconds between trials (plus a 1 s load sample)")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--design", choices=DESIGNS, default="main")
+    ap.add_argument("--episode-s", type=float, default=24.0, help="blame/tradeoff: seconds of foreground measurement per trial (longer lets held jobs be re-tested)")
     ap.add_argument("--fingerprint", action="store_true", help="learn this PC's contention fingerprints each block and attribute with them (always on for --design attribution)")
     ap.add_argument("--foreground", default=None, help='"probe" or "ui:<exe>" (default: ui:notepad.exe for realapp, probe otherwise)')
     args = ap.parse_args()
@@ -156,7 +157,7 @@ def main() -> None:
             host_load, waited = wait_for_quiet()  # covariate: non-study load just before the trial
             if args.design in ("blame", "tradeoff"):
                 from backend.govern import run_blame_trial
-                result = run_blame_trial(preset, policy, cal, seed=block * 100 + position, fingerprints=fps)
+                result = run_blame_trial(preset, policy, cal, seed=block * 100 + position, fingerprints=fps, episode_s=args.episode_s)
                 result.update(preset=preset, policy=policy, background_units_per_s={})
             else:
                 result = run_trial(preset, policy, cal, seed=block * 100 + position, foreground=foreground, fingerprints=fps)

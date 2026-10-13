@@ -27,6 +27,14 @@ foreach ($design in $Designs) {
   python -m research.analyze (Join-Path $out $id)
   $done += (Join-Path $out $id)
 }
+# Long-episode trade-off: held (not yet proven innocent) jobs need time to be re-tested and restored.
+if ($Designs -contains 'tradeoff' -and -not $Quick) {
+  $id = "$tag-tradeoff-long"
+  python -m research.run_study --design tradeoff --blocks 5 --episode-s 60 --study-id $id --out $out
+  if ($LASTEXITCODE -ne 0) { throw "study tradeoff-long failed" }
+  python -m research.analyze (Join-Path $out $id)
+  $done += (Join-Path $out $id)
+}
 $zip = Join-Path $out "$tag-smartswap-v3.zip"
 Compress-Archive -Path $done -DestinationPath $zip -Force
 Write-Host "Done. Send this file to be pooled with other machines: $zip"

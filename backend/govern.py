@@ -163,7 +163,7 @@ TRADEOFF_POLICIES = ("none", "nice_all", "ecoqos_all", "adaptive_all", "causalsh
 BLAME_FG_DURATION_S = 24.0  # long enough for up to 3 randomized rounds (about 5 s each) in every mode
 
 
-def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: int = 0, cancel: threading.Event | None = None, fingerprints: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: int = 0, cancel: threading.Event | None = None, fingerprints: dict[str, Any] | None = None, episode_s: float = BLAME_FG_DURATION_S) -> dict[str, Any]:
     """A blame trial (`mode` in BLAME_MODES) or a trade-off trial (`mode` in TRADEOFF_POLICIES)."""
     from .engine import Actuator
     spec = scenarios().get(scenario)
@@ -184,7 +184,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         anchor = str(time.time())
         for culprit, (label, role, children, extra) in [(True, spec["culprit"])] + [(False, d) for d in spec["decoys"]]:
             env = _env({"SS_ROLE": role, "SS_CHILDREN": str(children), "SS_CHILD_CODE": WORKER, "SS_STOP_EVENT": stop_event.name, "SS_IO_FILE": str(bg_file),
-                        "SS_BG_IO_BLOCK": str(1 << 20), "SS_BG_MEM_BYTES": str(64 << 20), "SS_SEED": str(seed * 1000 + len(apps)), "SS_T0": anchor, "SS_BG_MAX_DURATION": "90", **extra})
+                        "SS_BG_IO_BLOCK": str(1 << 20), "SS_BG_MEM_BYTES": str(64 << 20), "SS_SEED": str(seed * 1000 + len(apps)), "SS_T0": anchor, "SS_BG_MAX_DURATION": str(episode_s + 60), **extra})
             apps.append({"label": label, "role": role, "children": children, "culprit": culprit, "proc": _spawn(LAUNCHER, env)})
         for a in apps:
             if a["proc"].stdout.readline().strip() != "READY": raise RuntimeError(f"{a['label']} failed: " + a["proc"].stderr.read()[-300:])
@@ -264,8 +264,8 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
                 overhead_s += time.process_time() - tick
         ctl_thread = threading.Thread(target=loop, daemon=True); ctl_thread.start()
 
-        fg = _spawn(PROBE, _env({**FG_ENV, "SS_DURATION": str(BLAME_FG_DURATION_S), "SS_IO_FILE": str(probe_file), "SS_SEED": str(seed + 7)}))
-        deadline = time.time() + 90
+        fg = _spawn(PROBE, _env({**FG_ENV, "SS_DURATION": str(episode_s), "SS_IO_FILE": str(probe_file), "SS_SEED": str(seed + 7)}))
+        deadline = time.time() + episode_s + 60
         while True:
             try: out, err = fg.communicate(timeout=0.25); break
             except Exception:
@@ -309,7 +309,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         "reverts_verified": all(e["verified"] for e in ledger.entries if e["kind"].endswith("_revert")) if any(e["kind"].endswith("_revert") for e in ledger.entries) else None,
         "controller_trace": controller.trace, "governor_cpu_share": round(overhead_s / max(1e-3, time.time() - t0), 5),
         "calibration": asdict(calibration), "fingerprints": fingerprints, "app_units_per_s": app_units,
-        "t_ready_wall": t_ready if apps else None, "fg_wall_start": fg_out.get("wall_start"),
+        "t_ready_wall": t_ready if apps else None, "episode_s": episode_s, "fg_wall_start": fg_out.get("wall_start"),
         "shield": (shield.summary() | {"ops": ops_log}) if shield else None,
     }
 
