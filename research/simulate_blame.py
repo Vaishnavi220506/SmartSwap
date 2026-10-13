@@ -38,9 +38,10 @@ def run_once(kind: str, drift: float, effect: float, noise: float, seed: int, pe
         base = base0 + (drift if t >= step_at else 0.0)
         wsi = max(0.0, base + (effect if CULPRIT not in it.nudged else 0.0) + rng.gauss(0, noise))
         history.append(wsi); it.step(True, "cpu", history, ranked)
-        if kind == "presumed" and restored_at is None and t > 5 and INNOCENT not in it.nudged: restored_at = t
+        if kind == "presumed" and restored_at is None and any(v["app"] == INNOCENT and v["verdict"] == "exonerated" for v in it.verdicts): restored_at = t  # a verdict, not a test slot
     if kind == "presumed":  # verdicts are about release: harm = culprit set free, cost = time the innocent stays lowered
-        return CULPRIT not in it.nudged, INNOCENT in it.nudged, restored_at
+        last = {v["app"]: v["verdict"] for v in it.verdicts}  # end state by verdict, so a mid-experiment slot does not count
+        return last.get(CULPRIT) == "exonerated", last.get(INNOCENT) != "exonerated", restored_at
     confirmed = {v["app"] for v in it.verdicts if v["verdict"] == "confirmed"}
     return INNOCENT in confirmed, CULPRIT not in confirmed
 
