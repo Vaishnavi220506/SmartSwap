@@ -30,13 +30,15 @@ CULPRIT, INNOCENT = 1, 2
 
 def run_once(kind: str, drift: float, effect: float, noise: float, seed: int, periods: int = 90) -> tuple[bool, bool]:
     rng = random.Random(seed)
-    it = FactorialInterrogator(seed=seed) if kind == "factorial" else Interrogator("interventional")
+    it = (FactorialInterrogator(seed=seed, presume_guilty=True) if kind == "presumed" else FactorialInterrogator(seed=seed) if kind == "factorial" else Interrogator("interventional"))
     ranked = [Suspect(INNOCENT, "innocent", [INNOCENT], 0.9, 0.9, 0.0, 1.0, 1.0, False), Suspect(CULPRIT, "culprit", [CULPRIT], 0.5, 0.5, 0.0, 1.0, 1.0, False)]
     step_at = rng.randrange(2, 12); base0 = 6.0; history: list[float] = []
     for t in range(periods):
         base = base0 + (drift if t >= step_at else 0.0)
         wsi = max(0.0, base + (effect if CULPRIT not in it.nudged else 0.0) + rng.gauss(0, noise))
         history.append(wsi); it.step(True, "cpu", history, ranked)
+    if kind == "presumed":  # verdicts are about release: harm = culprit set free, cost = innocent still lowered at the end
+        return CULPRIT not in it.nudged, INNOCENT in it.nudged
     confirmed = {v["app"] for v in it.verdicts if v["verdict"] == "confirmed"}
     return INNOCENT in confirmed, CULPRIT not in confirmed
 
@@ -44,7 +46,7 @@ def run_once(kind: str, drift: float, effect: float, noise: float, seed: int, pe
 def sweep(runs: int, effect: float = 6.0, noise: float = 1.0) -> list[dict]:
     rows = []
     for drift in (-8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0):
-        for kind in ("interventional", "factorial"):
+        for kind in ("interventional", "factorial", "presumed"):
             outcomes = [run_once(kind, drift, effect, noise, seed) for seed in range(runs)]
             rows.append({"drift": drift, "method": kind, "runs": runs, "false_blame": sum(f for f, _ in outcomes) / runs, "miss": sum(m for _, m in outcomes) / runs})
     return rows
@@ -58,7 +60,10 @@ def main() -> None:
     (args.out / "sweep.json").write_text(json.dumps(rows, indent=2))
     L = ["# Blame under load drift (simulation)", "", f"Culprit effect 6 WSI points, noise sd 1, {args.runs} runs per cell; the innocent app is ranked first.", "",
          "| Load drift during test (WSI points) | Method | False blame (innocent confirmed) | Miss (culprit never confirmed) |", "|---:|---|---:|---:|"]
-    L += [f"| {r['drift']:+.0f} | {r['method']} | {100 * r['false_blame']:.1f}% | {100 * r['miss']:.1f}% |" for r in rows]
+    L += [f"| {r['drift']:+.0f} | {r['method']} | {100 * r['false_blame']:.1f}% | {100 * r['miss']:.1f}% |" for r in rows if r["method"] != "presumed"]
+    L += ["", "Presumed guilty (the shipped mode): verdicts decide *release*, so the errors that matter differ.", "",
+          "| Load drift | Culprit wrongly set free | Innocent still lowered at the end |", "|---:|---:|---:|"]
+    L += [f"| {r['drift']:+.0f} | {100 * r['false_blame']:.1f}% | {100 * r['miss']:.1f}% |" for r in rows if r["method"] == "presumed"]
     (args.out / "RESULTS.md").write_text("\n".join(L) + "\n")
     try:
         import matplotlib

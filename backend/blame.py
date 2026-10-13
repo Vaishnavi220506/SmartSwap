@@ -284,6 +284,34 @@ def permutation_effect(y: list[float], x: list[int], permutations: int = 2000, s
     return effect, (hits + 1) / (permutations + 1)
 
 
+def residualize(y: list[float], others: list[list[int]]) -> list[float]:
+    """y minus its least-squares fit on an intercept and the other suspects' assignments.
+
+    In a factorial round every suspect's effect is in y; testing one suspect on raw y lets the
+    others' effects leak into its estimate whenever the random schedules overlap. Regressing the
+    others out first (per round, so between-round load shifts are absorbed by the intercept)
+    leaves only this suspect's effect and noise. Re-centered on the mean of y."""
+    from .controller import _solve
+    cols = [[1.0] * len(y)] + [[float(v) for v in c] for c in others if len(set(c)) > 1]
+    ata = [[sum(a * b for a, b in zip(ci, cj)) for cj in cols] for ci in cols]
+    atb = [sum(a * b for a, b in zip(ci, y)) for ci in cols]
+    w = _solve(ata, atb)
+    if w is None: return list(y)
+    mean = statistics.fmean(y)
+    return [v - sum(wi * c[i] for wi, c in zip(w, cols)) + mean for i, v in enumerate(y)]
+
+
+def innocence_p(y: list[float], x: list[int], delta: float, permutations: int = 2000, seed: int = 5) -> float:
+    """One-sided permutation p-value against H0: the job's harm is at least `delta` WSI points.
+
+    x=1 marks slots where the job was lowered, so its harm is tau = mean(y | x=0) - mean(y | x=1).
+    Under H0 tau = delta, adding delta to the lowered slots removes the effect; a small p means the
+    data are implausible if tau were delta or more, i.e. the job is shown to be (nearly) harmless."""
+    shifted = [v + delta if b else v for v, b in zip(y, x)]
+    _, p = permutation_effect([-v for v in shifted], x, permutations, seed)  # small when lowered slots sit *above* the shifted null
+    return p
+
+
 @dataclass
 class FactorialInterrogator:
     """Randomized factorial micro-experiments over the top-k suspects (see module docstring)."""
@@ -292,7 +320,7 @@ class FactorialInterrogator:
     slo_wsi: float = 3.0
     k: int = 3
     slots: int = 8                  # balanced: each suspect is nudged in exactly slots/2 of them
-    slot_periods: int = 2           # the first period of a slot lets the canary window (8 beats = 320 ms) refill
+    slot_periods: int = 3           # the first period of a slot lets the canary window refill (2 measured periods per slot)
     alpha: float = 0.05
     min_effect: float = 1.0         # WSI points; smaller effects are not worth a nudge
     max_rounds: int = 3             # inconclusive suspects get up to this many randomized rounds, pooled
@@ -315,6 +343,8 @@ class FactorialInterrogator:
     period: int = 0
     nudged: dict[int, str] = field(default_factory=dict)
     held: dict[int, int] = field(default_factory=dict)  # app -> period at which it is re-tested
+    evidence: dict[int, Any] = field(default_factory=dict)  # presumed guilty: app -> (ys, xs, looks), pooled across re-tests
+
     holding: list[Any] | None = None
     confirmed: set[int] = field(default_factory=set)
     exonerated: dict[int, int] = field(default_factory=dict)
@@ -331,7 +361,7 @@ class FactorialInterrogator:
         if not engaged:
             if self.nudged:
                 out += [BlameDecision("release", app, hint, "stall cleared") for app, hint in sorted(self.nudged.items())]
-                self.nudged.clear(); self.confirmed.clear(); self.held.clear()
+                self.nudged.clear(); self.confirmed.clear(); self.held.clear(); self.evidence.clear()
             self.experiment = None; self.holding = None
             return out
         if self.holding is not None:  # presumed guilty: protection first, then the release experiment
@@ -350,19 +380,35 @@ class FactorialInterrogator:
                 self.experiment = None; look_alpha = self.alpha / self.max_rounds  # Bonferroni over the planned looks
                 y = [statistics.fmean(v) if v else 0.0 for v in e["y"]]; again = []
                 for app, plan in e["plan"].items():
-                    ys, xs = e["hist"].setdefault(app, ([], [])); ys += y; xs += plan
-                    effect, p = permutation_effect(ys, xs, seed=self.seed + self.period)
-                    guilty = p < look_alpha and -effect >= self.min_effect
-                    if not guilty and e["round"] < self.max_rounds and p < self.inconclusive_p and -effect >= self.min_effect / 2:
-                        again.append(app); continue  # promising but not yet significant: pool another round
-                    self.verdicts.append({"period": self.period, "app": app, "name": names.get(app, "?"), "verdict": "confirmed" if guilty else "exonerated",
-                                          "effect_wsi": round(effect, 3), "p": round(p, 4), "rounds": e["round"], "bill_ms_per_s": round(max(0.0, -effect) * 10, 1),
-                                          "wsi_before": round(e["baseline"], 3), "wsi_after": round(statistics.fmean(y), 3)})
+                    p_inn = None
+                    y_app = residualize(y, [q for o, q in e["plan"].items() if o != app])  # joint factorial estimate
+                    if self.presume_guilty:
+                        # Innocence must be proven too: release only if the effect is shown to be below the minimum
+                        # harmful effect (an equivalence-style test). Evidence pools across rounds and re-tests;
+                        # alpha is spent as alpha/2^k on the k-th look, so the total stays within alpha.
+                        ev = self.evidence.setdefault(app, [[], [], 0]); ev[0] += y_app; ev[1] += plan; ev[2] += 1; ys, xs = ev[0], ev[1]
+                        look_alpha = self.alpha / 2 ** ev[2]
+                        effect, p = permutation_effect(ys, xs, seed=self.seed + self.period)
+                        p_inn = innocence_p(ys, xs, self.min_effect, seed=self.seed + self.period)
+                        guilty = p < look_alpha and -effect >= self.min_effect
+                        innocent = not guilty and p_inn < look_alpha
+                        if not guilty and not innocent and e["round"] < self.max_rounds: again.append(app); continue
+                        verdict = "confirmed" if guilty else "exonerated" if innocent else "held"
+                    else:
+                        ys, xs = e["hist"].setdefault(app, ([], [])); ys += y_app; xs += plan
+                        effect, p = permutation_effect(ys, xs, seed=self.seed + self.period)
+                        guilty = p < look_alpha and -effect >= self.min_effect
+                        if not guilty and e["round"] < self.max_rounds and p < self.inconclusive_p and -effect >= self.min_effect / 2:
+                            again.append(app); continue  # promising but not yet significant: pool another round
+                        verdict = "confirmed" if guilty else "exonerated"
+                    self.verdicts.append({"period": self.period, "app": app, "name": names.get(app, "?"), "verdict": verdict,
+                                          "effect_wsi": round(effect, 3), "p": round(p, 4), "p_innocent": None if p_inn is None else round(p_inn, 4), "rounds": e["round"],
+                                          "bill_ms_per_s": round(max(0.0, -effect) * 10, 1), "wsi_before": round(e["baseline"], 3), "wsi_after": round(statistics.fmean(y), 3)})
                     if guilty:
                         if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"confirmed: nudging cut WSI by {-effect:.1f} points (p={p:.3f}, {e['round']} rounds)")); self.nudged[app] = e["hint"]
                         self.confirmed.add(app)
-                    elif self.presume_guilty and p < self.inconclusive_p and -effect >= self.min_effect / 2:
-                        self.verdicts[-1]["verdict"] = "held"; self.held[app] = self.period + self.held_retest_periods  # not proven innocent: stay on the safe side
+                    elif verdict == "held":
+                        self.held[app] = self.period + self.held_retest_periods  # not proven innocent: stay on the safe side
                         if app not in self.nudged: out.append(BlameDecision("nudge", app, e["hint"], f"inconclusive after {e['round']} rounds: kept lowered")); self.nudged[app] = e["hint"]
                     else:
                         self.exonerated[app] = self.period + self.cooldown_periods
