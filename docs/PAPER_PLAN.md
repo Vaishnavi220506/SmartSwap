@@ -89,6 +89,33 @@ The second run of presumed guilty still failed. Its logs showed the CPU culprit 
 - Open problems: (1) time to the last verdict is about 18 s, so whole-window p95 is still 1.25–1.86× worse than lowering everyone; (2) innocent jobs that stay inconclusive are held lowered (11 cases).
 - 4 blocks are underpowered (Holm p = 1.0 everywhere). The Windows `tradeoff` study, with 10 blocks on 3+ hosts, is the real test of H6 and H7.
 
+### Fourth iteration: proven innocence (internal check, 6 blocks, different VM hardware, not paper evidence)
+
+The 6-block re-run after two speed tweaks (shorter slots, early re-test of held jobs) regressed: the culprit was released 13 times. The cause was conceptual: "not proven guilty" released jobs whenever power was low. The fixes:
+- **innocence must be proven:** a permutation equivalence test against a 2-point (20 ms/s) margin;
+- **joint estimation:** the other suspects' assignments are regressed out per round;
+- **α spending:** α/2^k on the k-th look;
+- **3-period slots.**
+
+Simulation after the fixes: the culprit is never freed, and innocents are restored after a median of 5.8 s.
+
+Real processes, 6 blocks, CausalShield ÷ lower every job, after the verdicts:
+
+| Scenario | p95 ratio | Innocent work kept |
+|---|---:|---:|
+| CPU | 1.14 [0.96, 1.70] | +0.21 [-0.09, 0.25] |
+| Storage vs. CPU | 0.99 [0.88, 1.19] | +0.02 |
+| Phased culprit | 1.06 [0.98, 1.39] | +0.08 [0.01, 0.14] |
+| Polite hog (bandwidth) | 1.58 [1.23, 1.87] | -0.03 |
+
+- Culprit freed once (was 13).
+- 17 innocent jobs held: not proven innocent within the 24 s window.
+- 1 innocent wrongly confirmed.
+- The bandwidth scenario often never engaged.
+- Nothing is significant at 6 blocks. On this host, H7 looks plausible for CPU and storage culprits; H6's margin over priority-lowering is small; bandwidth culprits are an open problem.
+
+Implication for the Windows study: run `tradeoff` with longer episodes as well as 24 s trials, because held innocents need re-tests to clear. Report the bandwidth scenario as a limitation if it fails there too.
+
 ## Protocol
 
 1. Commit `research/hypotheses.json` **before** collecting v3 data. That commit is the pre-registration.
