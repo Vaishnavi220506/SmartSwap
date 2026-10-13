@@ -176,7 +176,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
     controller = Controller(calibration, float(CANARY_ENV["SS_INTERVAL"]) * 1000, ControllerConfig(act=(mode == "adaptive_all"), fingerprints=fingerprints))
     governor = ExternalGovernor(ledger, journal=None); blamer = interrogator = None
     group: Actuator | None = None; app_act: dict[int, Actuator] = {}; shield = None; ops_log: list[dict[str, Any]] = []; app_out: dict[str, Any] = {}
-    fg_out: dict[str, Any] = {}; events: list[dict[str, Any]] = []; overhead_s = 0.0
+    fg_out: dict[str, Any] = {}; events: list[dict[str, Any]] = []; overhead_s = 0.0; t_ready: float | None = None
     try:
         canary = _spawn(PROBE, _env({**CANARY_ENV, "SS_IO_FILE": str(probe_file), "SS_SEED": str(seed + 101)}))
         if canary.stdout.readline().strip() != "READY": raise RuntimeError("canary failed to start")
@@ -213,14 +213,19 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         def loop() -> None:
             nonlocal overhead_s
             label_of = {a["proc"].pid: a["label"] for a in apps}; last_snap = None; tick_n = 0
+            managed = {a["proc"].pid for a in apps}; last_use = group.group_usage(); last_use_t = time.time()
             while not stop.wait(CONTROL_PERIOD_S):
                 tick = time.process_time()
-                for d in controller.step((time.time() - t0) * 1000, canary_rows[-controller.cfg.window_beats:], None):
+                group.refresh(); use, use_t = group.group_usage(), time.time()  # managed jobs still busy? (CPU cores or I/O MB/s)
+                active = (use[0] - last_use[0]) / max(1e-3, use_t - last_use_t) >= 0.1 or (use[1] - last_use[1]) / 1e6 / max(1e-3, use_t - last_use_t) >= 1.0
+                last_use, last_use_t = use, use_t
+                for d in controller.step((time.time() - t0) * 1000, canary_rows[-controller.cfg.window_beats:], active):
                     group.refresh(); group.apply(d)  # adaptive_all: the v2 ladder on every managed job
                 row = controller.trace[-1]
                 tick_n += 1
                 if controller.engaged or tick_n % CALM_SNAPSHOT_EVERY == 0:  # full rate only while a stall is engaged
                     snap_t = time.time(); blamer.update(snapshot(), row["wsi"], row["excess"], native.foreground_pid(), elapsed_s=(snap_t - last_snap) if last_snap else None); last_snap = snap_t
+                    for app in list(blamer.protected): blamer.protected[app] = blamer.protected[app] or app not in managed  # only opted-in jobs are candidates
                 if shield is not None:
                     seen = len(interrogator.verdicts)
                     for op in shield.step(controller, row["attributed"] if row["attributed"] != "none" else controller.resource, blamer.names):
@@ -303,6 +308,7 @@ def run_blame_trial(scenario: str, mode: str, calibration: Calibration, seed: in
         "reverts_verified": all(e["verified"] for e in ledger.entries if e["kind"].endswith("_revert")) if any(e["kind"].endswith("_revert") for e in ledger.entries) else None,
         "controller_trace": controller.trace, "governor_cpu_share": round(overhead_s / max(1e-3, time.time() - t0), 5),
         "calibration": asdict(calibration), "fingerprints": fingerprints, "app_units_per_s": app_units,
+        "t_ready_wall": t_ready if apps else None, "fg_wall_start": fg_out.get("wall_start"),
         "shield": (shield.summary() | {"ops": ops_log}) if shield else None,
     }
 

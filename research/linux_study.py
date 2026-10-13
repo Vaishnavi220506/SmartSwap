@@ -217,12 +217,20 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
         def loop() -> None:
             nonlocal overhead
             from backend.govern import snapshot
-            last = posix.psi_totals(); last_t = time.time(); label_of = {a["proc"].pid: a["label"] for a in apps}; last_snap = None; tick_n = 0
+            last = posix.psi_totals(); last_t = time.time(); label_of = {a["proc"].pid: a["label"] for a in apps}; last_snap = None; tick_n = 0; last_use = None
+            managed = {a["proc"].pid for a in apps}
             while not stop.wait(CONTROL_PERIOD_S):
                 tick = time.process_time(); now = posix.psi_totals(); now_t = time.time()
                 psi = {k: round(min(100.0, 100 * (now[k] - last.get(k, now[k])) / 1e6 / max(1e-3, now_t - last_t)), 3) for k in now}; last, last_t = now, now_t
                 if not rows: continue
-                for d in controller.step((now_t - t0) * 1000, rows[-cfg.window_beats:], None):
+                active = None
+                if blame and actuator:  # are the managed jobs still busy? keeps "calm because we lowered them" from ending the episode
+                    use = 0.0
+                    for q in actuator._tree():
+                        try: t_ = psutil.Process(q).cpu_times(); use += t_.user + t_.system
+                        except psutil.Error: pass
+                    active = last_use is not None and (use - last_use) / CONTROL_PERIOD_S >= 0.1; last_use = use
+                for d in controller.step((now_t - t0) * 1000, rows[-cfg.window_beats:], active):
                     if actuator: actuator.apply(d)
                 row = controller.trace[-1]; row["psi"] = psi
                 tick_n += 1
@@ -231,7 +239,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
                     tree = {os.getpid()} | {c.pid for c in psutil.Process().children(recursive=True)}
                     outside = {p.pid for p in snap} - tree
                     blamer.update(snap, row["wsi"], row["excess"], elapsed_s=(snap_t - last_snap) if last_snap else None); last_snap = snap_t
-                    for app in list(blamer.protected): blamer.protected[app] = blamer.protected[app] or app in outside
+                    for app in list(blamer.protected): blamer.protected[app] = blamer.protected[app] or app in outside or app not in managed  # only opted-in jobs are candidates
                     if shield is not None:
                         seen = len(interrogator.verdicts)
                         for op in shield.step(controller, row["attributed"] if row["attributed"] != "none" else controller.resource, blamer.names):
@@ -298,6 +306,7 @@ def run_trial(design: str, preset: str, policy: str, cal: Calibration, seed: int
               "fingerprints": fingerprints, "time_to_first_action_s": None, "control_cpu_share": round(overhead / max(1e-3, time.time() - t0), 5)}
     if blame:
         result["app_units_per_s"] = {o["label"]: round(o.get("units_per_s", 0.0), 3) for o in outs if "label" in o}
+        result["t_ready_wall"] = t_ready if apps else None; result["fg_wall_start"] = fg_out.get("wall_start")
         if shield is not None: result["shield"] = shield.summary() | {"ops": ops_log}
         result.update(scenario=preset, mode=policy, culprit=apps[0]["label"] if apps else None, events=events,
                       apps=[{k: v for k, v in a.items() if k != "proc"} | {"pid": a["proc"].pid} for a in apps],

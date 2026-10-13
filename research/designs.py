@@ -215,6 +215,20 @@ def kept(t: dict[str, Any], ref: dict[str, Any], labels: list[str]) -> float | N
     return statistics.fmean(ratios) if ratios else None
 
 
+def verdict_cutoff_s(t: dict[str, Any]) -> float:
+    """Seconds into the foreground run at which CausalShield's last verdict landed (0 if none)."""
+    if not t.get("t_ready_wall") or not t.get("fg_wall_start"): return 0.0
+    times = [e["t_s"] for e in t.get("events", []) if e["kind"] in ("confirm", "exonerate")]
+    return max(0.0, t["t_ready_wall"] + max(times) - t["fg_wall_start"]) if times else 0.0
+
+
+def steady_p95(t: dict[str, Any], cutoff_s: float) -> float | None:
+    """p95 of the foreground beats after `cutoff_s` (the same cut for every policy in a block)."""
+    from backend.engine import beat_latency
+    lat = sorted(beat_latency(r) for r in t.get("foreground_rows", []) if r["t"] / 1000 >= cutoff_s + 1.0)
+    return lat[min(len(lat) - 1, int(0.95 * len(lat)))] if len(lat) >= 20 else None
+
+
 def analyse_tradeoff(study: Path, out: Path) -> dict[str, Any]:
     """Go/no-go: does blaming first protect the foreground as well as lowering everyone, while keeping innocent work?"""
     from backend.stats import bootstrap_median_ci, wilcoxon_signed_rank
@@ -223,6 +237,10 @@ def analyse_tradeoff(study: Path, out: Path) -> dict[str, Any]:
     idx = index(trials); out.mkdir(parents=True, exist_ok=True)
     scenarios = sorted({p for p, _ in idx}); policies = [q for q in TRADEOFF_NAMES if any(qq == q for _, qq in idx)]
     cells, family = {}, []
+    cut = {(s, b): verdict_cutoff_s(t) for (s, q), by in idx.items() if q == "causalshield" for b, t in by.items()}
+    def steady_ratio(s: str, q: str, b: int) -> float | None:
+        c = cut.get((s, b), 0.0); a, r = steady_p95(idx[(s, q)][b], c), steady_p95(idx[(s, "none")][b], c)
+        return a / r if a and r else None
     for s in scenarios:
         ref = idx[(s, "none")]
         for q in policies:
@@ -231,7 +249,8 @@ def analyse_tradeoff(study: Path, out: Path) -> dict[str, Any]:
             apps = by[blocks[0]].get("apps") or []; culprit = [a["label"] for a in apps if a["culprit"]]; innocent = [a["label"] for a in apps if not a["culprit"]]
             ik = [kept(by[b], ref[b], innocent) for b in blocks]; ck = [kept(by[b], ref[b], culprit) for b in blocks]
             ratio = [by[b]["foreground"]["p95_ms"] / ref[b]["foreground"]["p95_ms"] for b in blocks]
-            cells[f"{s}/{q}"] = {"n": len(blocks), "p95_ratio_median": statistics.median(ratio), "innocent_kept_median": statistics.median([x for x in ik if x is not None] or [float("nan")]),
+            steady = [x for x in (steady_ratio(s, q, b) for b in blocks) if x is not None]
+            cells[f"{s}/{q}"] = {"n": len(blocks), "p95_ratio_median": statistics.median(ratio), "steady_p95_ratio_median": statistics.median(steady) if steady else None, "innocent_kept_median": statistics.median([x for x in ik if x is not None] or [float("nan")]),
                                  "culprit_kept_median": statistics.median([x for x in ck if x is not None] or [float("nan")])}
         for base in ("nice_all", "adaptive_all", "ecoqos_all"):
             if not idx[(s, "causalshield")] or not idx[(s, base)]: continue
@@ -241,7 +260,12 @@ def analyse_tradeoff(study: Path, out: Path) -> dict[str, Any]:
             d_keep = [(kept(idx[(s, "causalshield")][b], ref[b], innocent) or 0) - (kept(idx[(s, base)][b], ref[b], innocent) or 0) for b in blocks]
             family.append({"scenario": s, "vs": base, "metric": "innocent work kept (difference)", "n": len(blocks), "median": statistics.median(d_keep), "ci": bootstrap_median_ci(d_keep), "p": wilcoxon_signed_rank(d_keep)})
             c = compare(idx, s, "causalshield", base)
-            if c: family.append({"scenario": s, "vs": base, "metric": "foreground p95 (ratio)", "n": c["n"], "median": c["median_ratio"], "ci": (c["ci_low"], c["ci_high"]), "p": c["p"]})
+            if c: family.append({"scenario": s, "vs": base, "metric": "foreground p95, whole window (ratio)", "n": c["n"], "median": c["median_ratio"], "ci": (c["ci_low"], c["ci_high"]), "p": c["p"]})
+            pairs = [(steady_p95(idx[(s, "causalshield")][b], cut.get((s, b), 0.0)), steady_p95(idx[(s, base)][b], cut.get((s, b), 0.0))) for b in blocks]
+            pairs = [(x, y) for x, y in pairs if x and y]
+            if len(pairs) >= 3:
+                rs = [x / y for x, y in pairs]
+                family.append({"scenario": s, "vs": base, "metric": "foreground p95 after the verdicts (ratio)", "n": len(rs), "median": statistics.median(rs), "ci": bootstrap_median_ci(rs), "p": wilcoxon_signed_rank([x - y for x, y in pairs])})
     for c, padj in zip(family, holm([c["p"] for c in family])): c["p_holm"] = padj
     summary = {"study_id": manifest["study_id"], "design": "tradeoff", "host": manifest["host"], "trials": len(trials), "trials_with_errors": sum(1 for t in trials if t["errors"]),
                "cells": cells, "tests": family,
@@ -250,9 +274,9 @@ def analyse_tradeoff(study: Path, out: Path) -> dict[str, Any]:
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float), encoding="utf-8")
     f = lambda v: "-" if v is None or v != v else f"{v:.2f}"
     L = [f"# Trade-off study {summary['study_id']}: protect the foreground, keep innocent work", "", f"Host: {manifest['host'].get('cpu')}. Trials: {summary['trials']} ({summary['trials_with_errors']} with errors).", "",
-         "| Scenario | Policy | n | p95 vs none | innocent work kept | culprit work kept |", "|---|---|---:|---:|---:|---:|"]
+         "| Scenario | Policy | n | p95 vs none (whole window) | p95 vs none (after verdicts) | innocent work kept | culprit work kept |", "|---|---|---:|---:|---:|---:|---:|"]
     for key, c in cells.items():
-        s, q = key.split("/"); L.append(f"| {s} | {TRADEOFF_NAMES[q]} | {c['n']} | {f(c['p95_ratio_median'])} | {f(c['innocent_kept_median'])} | {f(c['culprit_kept_median'])} |")
+        s, q = key.split("/"); L.append(f"| {s} | {TRADEOFF_NAMES[q]} | {c['n']} | {f(c['p95_ratio_median'])} | {f(c['steady_p95_ratio_median'])} | {f(c['innocent_kept_median'])} | {f(c['culprit_kept_median'])} |")
     L += ["", "## CausalShield vs. each blanket policy (paired by block, Holm-adjusted)", "", "| Scenario | vs | metric | median [95% CI] | p (Holm) |", "|---|---|---|---|---:|"]
     L += [f"| {c['scenario']} | {TRADEOFF_NAMES[c['vs']]} | {c['metric']} | {f(c['median'])} [{f(c['ci'][0])}, {f(c['ci'][1])}] | {_p(c['p_holm'])} |" for c in family]
     L += ["", f"Uncertainty fallbacks taken: {summary['fallback_episodes']}."]
